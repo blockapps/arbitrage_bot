@@ -155,10 +155,6 @@ class ArbitrageExecutor:
                 estimated_profit=profit
             )
             
-            # Skip unprofitable sells based on cost basis
-            if not check_sell_pnl(self.pool, self.token_a.address, opportunity):
-                logger.info("Sell would realize a loss. Skipping.")
-                return None
             
             return opportunity
             
