@@ -56,13 +56,11 @@ class ArbitrageBot:
                 raise RuntimeError(f"Pool {i+1}: external_token_name is required in pool config")
         
         fee_bps = self.cfg["trading"]["fee_bps"]
-        oracle_timeout = self.cfg["oracle"]["timeout"]
-        self.oracle = PriceOracle(timeout=oracle_timeout)
-        
-        # Fetch prices for all external tokens from all pools
-        external_tokens = [p.get("external_token_name") for p in pools if p.get("external_token_name")]
-        if external_tokens:
-            self.oracle.fetch_all_prices(external_tokens, force_refresh=True)
+        oracle_cfg = self.cfg["oracle"]
+        self.oracle = PriceOracle(
+            timeout=oracle_cfg["timeout"],
+            blockapps_price_oracle=oracle_cfg.get("blockapps_price_oracle", "")
+        )
 
         trade_cfg = self.cfg["trading"]
         min_profit = Decimal(str(trade_cfg["min_profit"]))
@@ -75,6 +73,12 @@ class ArbitrageBot:
             
             pool = Pool(pool_addr, fee_bps=fee_bps, external_token_name=external_token_name)
             pool.fetch_pool_data()
+            
+            # Register BlockApps tokens (tokens not available on Alchemy)
+            # These use the on-chain BlockApps PriceOracle instead
+            blockapps_tokens = {"GOLDST", "SILVST"}
+            if external_token_name in blockapps_tokens:
+                self.oracle.register_blockapps_token(external_token_name, pool.token_a.address)
             
             executor = ArbitrageExecutor(
                 token_a=pool.token_a,
@@ -90,6 +94,11 @@ class ArbitrageBot:
             
             self.executors.append(executor)
             log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
+        
+        # Pre-fetch prices for all external tokens
+        external_tokens = [p.get("external_token_name") for p in pools if p.get("external_token_name")]
+        if external_tokens:
+            self.oracle.fetch_all_prices(external_tokens, force_refresh=True)
         
         if self.dry_run:
             log.info("dry-run mode enabled")

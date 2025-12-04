@@ -15,7 +15,8 @@ trading:
 
 # Oracle Configuration
 oracle:
-  timeout: 10 # API request timeout in seconds (unused, oracle is hardcoded)
+  timeout: 10 # API request timeout in seconds
+  blockapps_price_oracle: "0000000000000000000000000000000000001002" # BlockApps on-chain price oracle address
 
 # Execution Settings
 execution:
