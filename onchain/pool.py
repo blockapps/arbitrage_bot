@@ -223,7 +223,7 @@ class Pool:
         args = {
             'isAToB': is_a_to_b,
             'amountIn': amount_in,
-            'minAmountOut': min_amount_out,
+            'minAmountOut': int(min_amount_out*0.96),
             'deadline': deadline
         }
         

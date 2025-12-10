@@ -35,6 +35,13 @@ def api_request(
 ) -> requests.Response:
     """Make API request"""
     response = requests.request(method, url, timeout=timeout, **kwargs)
+    if not response.ok:
+        # Log the response body for debugging
+        try:
+            error_body = response.text
+            logger.error(f"API error response: {error_body}")
+        except Exception:
+            pass
     response.raise_for_status()
     return response
 
