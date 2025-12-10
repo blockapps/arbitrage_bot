@@ -1,19 +1,23 @@
 # Contract Addresses
 pools:
-  - address: "0000000000000000000000000000000000001017"  # Pool contract address (ETHST-USDST pool)
+  - address: "0000000000000000000000000000000000001017" # Pool contract address (ETHST-USDST pool)
     external_token_name: "ETH"
-  - address: "0000000000000000000000000000000000001019"  # Pool contract address (WBTC-USDST pool)
+  - address: "0000000000000000000000000000000000001019" # Pool contract address (WBTC-USDST pool)
     external_token_name: "BTC"
-
-# Trading Parameters  
+  - address: "000000000000000000000000000000000000101b" # Pool contract address (GOLDST-USDST pool)
+    external_token_name: "GOLDST"
+  - address: "000000000000000000000000000000000000101d" # Pool contract address (SILVST-USDST pool)
+    external_token_name: "SILVST"
+# Trading Parameters
 trading:
-  fee_bps: 30  # Pool fee in basis points (0.3%)
-  min_profit: 0.01  # $0.01 minimum profit
+  fee_bps: 30 # Pool fee in basis points (0.3%)
+  min_profit: 0.01 # $0.01 minimum profit
 
-# Oracle Configuration  
+# Oracle Configuration
 oracle:
-  timeout: 10  # API request timeout in seconds (unused, oracle is hardcoded)
+  timeout: 10 # API request timeout in seconds
+  blockapps_price_oracle: "0000000000000000000000000000000000001002" # BlockApps on-chain price oracle address
 
 # Execution Settings
 execution:
-  execution_interval: 60  # seconds between scans
+  execution_interval: 60 # seconds between scans
