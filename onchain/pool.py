@@ -126,10 +126,8 @@ class Pool:
             # Extract user balance and allowance from nested query
             token_a_balances = token_a_dict.get('balances', [])
             token_a_allowances = token_a_dict.get('allowances', [])
-            if token_a_balances:
-                self.token_a.balance = int(token_a_balances[0].get('value', '0'))
-            if token_a_allowances:
-                self.token_a.allowance = int(token_a_allowances[0].get('value', '0'))
+            self.token_a.balance = int(token_a_balances[0].get('value', '0')) if token_a_balances else 0
+            self.token_a.allowance = int(token_a_allowances[0].get('value', '0')) if token_a_allowances else 0
             
             if self.token_b is None:
                 self.token_b = Token(token_b_dict.get('address', ''))
@@ -141,10 +139,8 @@ class Pool:
             # Extract user balance and allowance from nested query
             token_b_balances = token_b_dict.get('balances', [])
             token_b_allowances = token_b_dict.get('allowances', [])
-            if token_b_balances:
-                self.token_b.balance = int(token_b_balances[0].get('value', '0'))
-            if token_b_allowances:
-                self.token_b.allowance = int(token_b_allowances[0].get('value', '0'))
+            self.token_b.balance = int(token_b_balances[0].get('value', '0')) if token_b_balances else 0
+            self.token_b.allowance = int(token_b_allowances[0].get('value', '0')) if token_b_allowances else 0
             
             # Create PoolData with references to token objects
             self._pool_data = PoolData(
