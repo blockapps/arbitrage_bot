@@ -8,10 +8,36 @@ import time
 import logging
 import requests
 from typing import Dict, Tuple
-from core.constants import WEI_SCALE
+from core.constants import WEI_SCALE, BLOCKAPPS_ORACLE_TOKENS
 from core.strato_client import strato_client
 
 logger = logging.getLogger(__name__)
+
+# USDST is a stablecoin pegged to $1
+USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
+
+# Token name to external price symbol mapping
+# Maps on-chain token names (e.g., "ETHST") to external oracle symbols (e.g., "ETH")
+TOKEN_TO_EXTERNAL_SYMBOL = {
+    "ETHST": "ETH",
+    "WBTCST": "BTC",
+    "GOLDST": "GOLDST",   # Uses BlockApps oracle
+    "SILVST": "SILVST",   # Uses BlockApps oracle
+    "USDST": "USDST",     # Stablecoin, always $1
+}
+
+
+def get_external_symbol(token_name: str) -> str:
+    """
+    Get the external price oracle symbol for a token name.
+    
+    Args:
+        token_name: On-chain token name (e.g., "ETHST", "WBTCST", "USDST")
+        
+    Returns:
+        External symbol for price lookup (e.g., "ETH", "BTC", "USDST")
+    """
+    return TOKEN_TO_EXTERNAL_SYMBOL.get(token_name, token_name)
 
 
 class PriceOracle:
@@ -108,6 +134,7 @@ class PriceOracle:
         """
         Fetch prices for all requested symbols from appropriate sources.
         
+        - USDST returns fixed price of $1 (stablecoin)
         - BlockApps tokens (registered via register_blockapps_token) use on-chain oracle
         - Other tokens use Alchemy API
         
@@ -128,6 +155,11 @@ class PriceOracle:
 
         # Check cache and categorize symbols by source
         for s in symbols:
+            # USDST is always $1 (stablecoin)
+            if s == "USDST":
+                prices[s] = USDST_PRICE_WEI
+                continue
+                
             cached = self._cache.get(s)
             if cached and not force_refresh and now - cached[1] < self.cache_duration:
                 prices[s] = cached[0]
@@ -165,3 +197,38 @@ class PriceOracle:
                     continue
 
         return prices
+    
+    def fetch_token_prices(self, token_a_name: str, token_b_name: str, force_refresh: bool = False) -> tuple[int, int]:
+        """
+        Fetch prices for both tokens in a pool and return their prices.
+        
+        Automatically converts token names (e.g., "ETHST", "WBTCST") to external 
+        price symbols (e.g., "ETH", "BTC") for oracle lookup.
+        
+        Args:
+            token_a_name: Name of token A (e.g., "ETHST")
+            token_b_name: Name of token B (e.g., "WBTCST", "USDST")
+            force_refresh: If True, bypass cache
+            
+        Returns:
+            Tuple of (price_a, price_b) in wei scale
+            
+        Raises:
+            ValueError: If prices cannot be fetched for either token
+        """
+        # Convert token names to external symbols
+        symbol_a = get_external_symbol(token_a_name)
+        symbol_b = get_external_symbol(token_b_name)
+        
+        # Fetch both prices
+        prices = self.fetch_all_prices([symbol_a, symbol_b], force_refresh=force_refresh)
+        
+        price_a = prices.get(symbol_a)
+        price_b = prices.get(symbol_b)
+        
+        if price_a is None:
+            raise ValueError(f"Failed to get price for {token_a_name} (symbol: {symbol_a})")
+        if price_b is None:
+            raise ValueError(f"Failed to get price for {token_b_name} (symbol: {symbol_b})")
+        
+        return price_a, price_b

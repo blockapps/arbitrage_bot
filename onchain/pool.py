@@ -33,8 +33,7 @@ class Pool:
     def __init__(
         self,
         address: str,
-        fee_bps: int = 30,
-        external_token_name: Optional[str] = None
+        fee_bps: int = 30
     ):
         """
         Initialize pool contract
@@ -42,11 +41,9 @@ class Pool:
         Args:
             address: Pool contract address
             fee_bps: Pool fee in basis points
-            external_token_name: External token name for oracle price lookup (e.g., "ETH", "WBTC")
         """
         self.address = address
         self.fee_bps = fee_bps
-        self.external_token_name = external_token_name
         
         # Tokens will be initialized when fetch_pool_data() is called
         self.token_a: Optional[Token] = None
