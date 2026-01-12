@@ -95,16 +95,27 @@ class ArbitrageExecutor:
                 logger.warning(f"No arbitrage opportunity: Invalid reserves (a={reserve_a}, b={reserve_b})")
                 return None
             
-            # Fetch price using fetch_all_prices
-            prices = self.oracle.fetch_all_prices([self.pool.external_token_name], force_refresh=True)
-            if self.pool.external_token_name not in prices:
-                logger.error(f"Failed to get oracle price for {self.pool.external_token_name}")
+            # Fetch prices for BOTH tokens in the pool
+            try:
+                price_a, price_b = self.oracle.fetch_token_prices(
+                    self.token_a.name,
+                    self.token_b.name,
+                    force_refresh=True
+                )
+            except ValueError as e:
+                logger.error(f"Failed to get oracle prices: {e}")
                 return None
             
-            oracle_price = prices[self.pool.external_token_name]
+            # Calculate oracle price ratio: how many token_b equals one token_a in value
+            # oracle_price = price_a / price_b (scaled by WEI_SCALE)
+            if price_b <= 0:
+                logger.warning(f"No arbitrage opportunity: Invalid oracle price_b ({price_b})")
+                return None
+            
+            oracle_price = (price_a * WEI_SCALE) // price_b
             
             if oracle_price <= 0:
-                logger.warning(f"No arbitrage opportunity: Invalid oracle price ({oracle_price})")
+                logger.warning(f"No arbitrage opportunity: Invalid oracle price ratio ({oracle_price})")
                 return None
             
             # Validate balances
@@ -116,9 +127,9 @@ class ArbitrageExecutor:
             price_diff = oracle_price - pool_price
             price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
             
-            logger.info(f"Pool price: {pool_price / WEI_SCALE:.6f} USDST per {self.token_a.symbol}")
-            logger.info(f"Oracle price: {oracle_price / WEI_SCALE:.6f} USDST per {self.token_a.symbol}")
-            logger.info(f"Price diff: {price_diff / WEI_SCALE:.6f} USDST ({price_diff_pct:.2f}%)")
+            logger.info(f"Pool price: {pool_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
+            logger.info(f"Oracle price: {oracle_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
+            logger.info(f"Price diff: {price_diff / WEI_SCALE:.6f} {self.token_b.symbol} ({price_diff_pct:.2f}%)")
             
             # Use auto-direction selection to find optimal trade (with gas-adjusted balances)
             reason, result = find_optimal_trade_auto(
@@ -138,15 +149,16 @@ class ArbitrageExecutor:
             side, amount_in, expected_out, profit = result
             
             # Map side to direction
-            # "X->Y" = ETHST->USDST = "sell"
-            # "Y->X" = USDST->ETHST = "buy"
+            # "X->Y" = token_a -> token_b = "sell" token_a
+            # "Y->X" = token_b -> token_a = "buy" token_a
             direction = "sell" if side == "X->Y" else "buy"
-            token_symbol = self.token_a.symbol if side == "X->Y" else self.token_b.symbol
+            token_in_symbol = self.token_a.symbol if side == "X->Y" else self.token_b.symbol
+            token_out_symbol = self.token_b.symbol if side == "X->Y" else self.token_a.symbol
             
             logger.info(f"{direction.capitalize()} opportunity found ({side}):")
-            logger.info(f"  Input: {amount_in / WEI_SCALE:.6f} {token_symbol} ({amount_in} wei)")
-            logger.info(f"  Output: {expected_out / WEI_SCALE:.6f} ({expected_out} wei)")
-            logger.info(f"  Profit: {profit / WEI_SCALE:.6f} USDST ({profit} wei)")
+            logger.info(f"  Input: {amount_in / WEI_SCALE:.6f} {token_in_symbol} ({amount_in} wei)")
+            logger.info(f"  Output: {expected_out / WEI_SCALE:.6f} {token_out_symbol} ({expected_out} wei)")
+            logger.info(f"  Profit: {profit / WEI_SCALE:.6f} {self.token_b.symbol} ({profit} wei)")
             
             opportunity = ArbitrageOpportunity(
                 direction=direction,

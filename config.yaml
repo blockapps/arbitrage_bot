@@ -1,13 +1,11 @@
 # Contract Addresses
 pools:
-  - address: "0000000000000000000000000000000000001017" # Pool contract address (ETHST-USDST pool)
-    external_token_name: "ETH"
-  - address: "0000000000000000000000000000000000001019" # Pool contract address (WBTC-USDST pool)
-    external_token_name: "BTC"
-  - address: "000000000000000000000000000000000000101b" # Pool contract address (GOLDST-USDST pool)
-    external_token_name: "GOLDST"
-  - address: "000000000000000000000000000000000000101d" # Pool contract address (SILVST-USDST pool)
-    external_token_name: "SILVST"
+  - address: "0000000000000000000000000000000000001017" # ETHST-USDST pool
+  - address: "0000000000000000000000000000000000001019" # WBTCST-USDST pool
+  - address: "000000000000000000000000000000000000101b" # GOLDST-USDST pool
+  - address: "000000000000000000000000000000000000101d" # SILVST-USDST pool
+  - address: "cb85e12ca5d98de95715fc75ae251a66b662ea06" # GOLDST-SILVST pool
+  - address: "34d7caf576cf9493f054d9eced99dcd463eba4b7" # ETHST-BTCST pool
 # Trading Parameters
 trading:
   fee_bps: 30 # Pool fee in basis points (0.3%)
