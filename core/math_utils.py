@@ -98,7 +98,7 @@ def find_optimal_trade_auto(
     balance_x: int,
     balance_y: int,
     fee_bps: int,
-    min_profit: int         # USDST wei
+    min_profit: int         # token Y wei (caller converts from USD)
 ) -> Tuple[Optional[str], Optional[Tuple[str, int, int, int]]]:
     """
     Returns: (reason, result) where:

@@ -25,7 +25,7 @@ class ArbitrageOpportunity:
     direction: str  # "buy" or "sell"
     optimal_input: int  # Optimal trade size in wei (input amount)
     expected_output: int  # Expected output amount in wei
-    estimated_profit: int  # Estimated profit after fees in wei
+    estimated_profit: int  # Estimated profit after fees in token B wei
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for logging/serialization"""
@@ -70,15 +70,19 @@ class ArbitrageExecutor:
         pool: Pool,
         oracle: PriceOracle,
         fee_bps: int,
-        min_profit: int
+        min_profit_usd: int
     ):
-        """Initialize arbitrage executor"""
+        """Initialize arbitrage executor
+        
+        Args:
+            min_profit_usd: Minimum profit threshold in USD (wei scale)
+        """
         self.token_a = token_a
         self.token_b = token_b
         self.pool = pool
         self.oracle = oracle
         self.fee_bps = fee_bps
-        self.min_profit = min_profit
+        self.min_profit_usd = min_profit_usd
         self._execution_lock = Lock()
         self.is_executing = False
         self.last_execution_time = 0
@@ -118,6 +122,12 @@ class ArbitrageExecutor:
                 logger.warning(f"No arbitrage opportunity: Invalid oracle price ratio ({oracle_price})")
                 return None
             
+            # Convert min_profit from USD to token_b amount
+            # min_profit_token_b = min_profit_usd / price_b_in_usd
+            # Since price_b is in USD (wei scale), we compute:
+            # min_profit_token_b = (min_profit_usd * WEI_SCALE) / price_b
+            min_profit_token_b = (self.min_profit_usd * WEI_SCALE) // price_b
+            
             # Validate balances
             if self.token_a.balance <= 0 and self.token_b.balance <= 0:
                 logger.warning(f"No arbitrage opportunity: No token balances")
@@ -139,7 +149,7 @@ class ArbitrageExecutor:
                 balance_x=check_gas_balance(self.token_a, self.token_a.balance),
                 balance_y=check_gas_balance(self.token_b, self.token_b.balance),
                 fee_bps=self.fee_bps,
-                min_profit=self.min_profit
+                min_profit=min_profit_token_b
             )
             
             if result is None:
@@ -207,8 +217,15 @@ class ArbitrageExecutor:
             transactions.append({'type': 'swap', 'hash': swap_hash, 'timestamp': time.time()})
             client.wait_for_transaction(swap_hash)
             
-            # Update cumulative profit after successful swap
-            update_cumulative_profit(opportunity.estimated_profit)
+            # Fetch fresh price_b from oracle for USD conversion
+            _, price_b = self.oracle.fetch_token_prices(
+                self.token_a.name,
+                self.token_b.name,
+                force_refresh=True
+            )
+            
+            # Update cumulative profit after successful swap (convert to USD)
+            update_cumulative_profit(opportunity.estimated_profit, price_b)
             
             return ExecutionResult(
                 success=True,

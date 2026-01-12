@@ -83,7 +83,7 @@ class ArbitrageBot:
                 pool=pool,
                 oracle=self.oracle,
                 fee_bps=fee_bps,
-                min_profit=min_profit_wei,
+                min_profit_usd=min_profit_wei,
             )
             
             # Ensure pool approvals
