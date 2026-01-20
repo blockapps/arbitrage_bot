@@ -83,16 +83,21 @@ def check_sell_pnl(pool: Pool, token_address: str, opportunity) -> bool:
     return sell_price_wei > avg_cost_wei
 
 
-def update_cumulative_profit(profit_wei: int, file_path: str = "profit.json"):
+def update_cumulative_profit(profit_token_b_wei: int, price_b: int, file_path: str = "profit.json"):
     """
     Update cumulative profit by adding new profit to existing total.
     Thread-safe file operations using file locking.
     
     Args:
-        profit_wei: Profit in wei to add to cumulative total
+        profit_token_b_wei: Profit in token B wei
+        price_b: USD price of token B in wei scale (e.g., 30 * 10^18 for $30)
         file_path: Path to profit tracking file (default: profit.json)
     """
     try:
+        # Convert profit from token B to USD
+        # profit_usd_wei = profit_token_b_wei * price_b / WEI_SCALE
+        profit_usd_wei = (profit_token_b_wei * price_b) // WEI_SCALE
+        
         # Read existing cumulative profit or start at 0, then write back atomically
         cumulative_profit_wei = 0
         if os.path.exists(file_path):
@@ -104,8 +109,8 @@ def update_cumulative_profit(profit_wei: int, file_path: str = "profit.json"):
                 finally:
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Unlock
         
-        # Add new profit
-        cumulative_profit_wei += profit_wei
+        # Add new profit (now in USD wei)
+        cumulative_profit_wei += profit_usd_wei
         cumulative_profit_usd = cumulative_profit_wei / WEI_SCALE
         
         # Write back to file with lock (atomic operation)
@@ -121,7 +126,7 @@ def update_cumulative_profit(profit_wei: int, file_path: str = "profit.json"):
             finally:
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)  # Unlock
         
-        logger.info(f"Cumulative profit updated: {cumulative_profit_usd:.6f} USDST ({cumulative_profit_wei} wei)")
+        logger.info(f"Cumulative profit updated: ${cumulative_profit_usd:.6f} ({cumulative_profit_wei} wei)")
         
     except Exception as e:
         logger.error(f"Failed to update cumulative profit: {e}")

@@ -12,9 +12,9 @@ import logging
 from decimal import Decimal
 
 from core.strato_client import strato_client
-from core.constants import WEI_SCALE
+from core.constants import WEI_SCALE, BLOCKAPPS_ORACLE_TOKENS
 from onchain.pool import Pool
-from market.oracle import PriceOracle
+from market.oracle import PriceOracle, get_external_symbol
 from engine.arb_executor import ArbitrageExecutor
 from engine.helpers import ensure_pool_approvals
 
@@ -48,12 +48,9 @@ class ArbitrageBot:
         # Validate all pool configs
         for i, pool_config in enumerate(pools):
             pool_addr = pool_config.get("address")
-            external_token_name = pool_config.get("external_token_name")
             
             if not pool_addr:
                 raise RuntimeError(f"Pool {i+1}: address is required in config.yaml")
-            if not external_token_name:
-                raise RuntimeError(f"Pool {i+1}: external_token_name is required in pool config")
         
         fee_bps = self.cfg["trading"]["fee_bps"]
         oracle_cfg = self.cfg["oracle"]
@@ -69,16 +66,16 @@ class ArbitrageBot:
         # Initialize executor for each pool
         for pool_config in pools:
             pool_addr = pool_config.get("address")
-            external_token_name = pool_config.get("external_token_name")
             
-            pool = Pool(pool_addr, fee_bps=fee_bps, external_token_name=external_token_name)
+            pool = Pool(pool_addr, fee_bps=fee_bps)
             pool.fetch_pool_data()
             
-            # Register BlockApps tokens (tokens not available on Alchemy)
-            # These use the on-chain BlockApps PriceOracle instead
-            blockapps_tokens = {"GOLDST", "SILVST"}
-            if external_token_name in blockapps_tokens:
-                self.oracle.register_blockapps_token(external_token_name, pool.token_a.address)
+            # Auto-register BlockApps tokens based on token names
+            # These use the on-chain BlockApps PriceOracle instead of Alchemy
+            for token in [pool.token_a, pool.token_b]:
+                external_symbol = get_external_symbol(token.name)
+                if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
+                    self.oracle.register_blockapps_token(external_symbol, token.address)
             
             executor = ArbitrageExecutor(
                 token_a=pool.token_a,
@@ -86,7 +83,7 @@ class ArbitrageBot:
                 pool=pool,
                 oracle=self.oracle,
                 fee_bps=fee_bps,
-                min_profit=min_profit_wei,
+                min_profit_usd=min_profit_wei,
             )
             
             # Ensure pool approvals
@@ -95,10 +92,14 @@ class ArbitrageBot:
             self.executors.append(executor)
             log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
         
-        # Pre-fetch prices for all external tokens
-        external_tokens = [p.get("external_token_name") for p in pools if p.get("external_token_name")]
-        if external_tokens:
-            self.oracle.fetch_all_prices(external_tokens, force_refresh=True)
+        # Pre-fetch prices for all tokens in all pools
+        all_token_symbols = set()
+        for executor in self.executors:
+            all_token_symbols.add(get_external_symbol(executor.token_a.name))
+            all_token_symbols.add(get_external_symbol(executor.token_b.name))
+        
+        if all_token_symbols:
+            self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
         
         if self.dry_run:
             log.info("dry-run mode enabled")
