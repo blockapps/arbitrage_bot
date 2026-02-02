@@ -6,6 +6,7 @@ pools:
   - address: "000000000000000000000000000000000000101d" # SILVST-USDST pool
   - address: "cb85e12ca5d98de95715fc75ae251a66b662ea06" # GOLDST-SILVST pool
   - address: "34d7caf576cf9493f054d9eced99dcd463eba4b7" # ETHST-BTCST pool
+  - address: "72f029994b1003447b4fcae5025ae78fcbec258e" # wstETHST-USDST pool
 # Trading Parameters
 trading:
   fee_bps: 30 # Pool fee in basis points (0.3%)
@@ -19,3 +20,4 @@ oracle:
 # Execution Settings
 execution:
   execution_interval: 60 # seconds between scans
+  # vault_addr: "d556695364551c8c7eb336f0bed9aed9e1acd69d" # this is testnet vault address

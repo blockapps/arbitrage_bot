@@ -13,11 +13,10 @@ from core.constants import MAX_UINT256, USDST_ADDRESS, WEI_SCALE
 logger = logging.getLogger(__name__)
 
 
-def ensure_pool_approvals(token_a: Token, token_b: Token, pool: Pool):
+def ensure_pool_approvals(token_a: Token, token_b: Token, pool: Pool, vault_addr: str = ""):
     """Ensure infinite pool allowance for both tokens."""
     client = strato_client()
     pool_addr = pool.address
-    
     for token in (token_a, token_b):
         if not token or not token.address:
             continue
@@ -28,6 +27,10 @@ def ensure_pool_approvals(token_a: Token, token_b: Token, pool: Pool):
             tx = token.approve(pool_addr, MAX_UINT256)
             client.wait_for_transaction(tx)
             logger.info(f"{token.symbol} approved")
+            if vault_addr:
+                tx = token.approve(vault_addr, MAX_UINT256)
+                client.wait_for_transaction(tx)
+                logger.info(f"{token.symbol} approved for vault")
         except Exception as e:
             logger.error(f"Approval failed for {token.symbol}: {e}")
             raise

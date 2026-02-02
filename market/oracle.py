@@ -21,9 +21,6 @@ USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
 TOKEN_TO_EXTERNAL_SYMBOL = {
     "ETHST": "ETH",
     "WBTCST": "BTC",
-    "GOLDST": "GOLDST",   # Uses BlockApps oracle
-    "SILVST": "SILVST",   # Uses BlockApps oracle
-    "USDST": "USDST",     # Stablecoin, always $1
 }
 
 

@@ -62,6 +62,9 @@ class ArbitrageBot:
         trade_cfg = self.cfg["trading"]
         min_profit = Decimal(str(trade_cfg["min_profit"]))
         min_profit_wei = int(min_profit * WEI_SCALE)
+        
+        exec_cfg = self.cfg.get("execution", {})
+        self.vault_addr = exec_cfg.get("vault_addr", "")
 
         # Initialize executor for each pool
         for pool_config in pools:
@@ -87,7 +90,7 @@ class ArbitrageBot:
             )
             
             # Ensure pool approvals
-            ensure_pool_approvals(pool.token_a, pool.token_b, pool)
+            ensure_pool_approvals(pool.token_a, pool.token_b, pool, self.vault_addr)
             
             self.executors.append(executor)
             log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
