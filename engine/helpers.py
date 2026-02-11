@@ -20,8 +20,6 @@ def ensure_pool_approvals(token_a: Token, token_b: Token, pool: Pool, vault_addr
     for token in (token_a, token_b):
         if not token or not token.address:
             continue
-        if token.allowance >= MAX_UINT256:
-            continue
         try:
             logger.info(f"Approving {token.symbol} for pool...")
             tx = token.approve(pool_addr, MAX_UINT256)
