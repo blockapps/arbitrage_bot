@@ -20,4 +20,4 @@ oracle:
 # Execution Settings
 execution:
   execution_interval: 60 # seconds between scans
-  vault_addr: "34bc729f66106a146b0864e673a3571b28fa23e1" # this is testnet vault address
+  vault_addr: "34bc729f66106a146b0864e673a3571b28fa23e1" # this is mainnet vault address
