@@ -16,12 +16,30 @@ logger = logging.getLogger(__name__)
 # USDST is a stablecoin pegged to $1
 USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
 
-# Token name to external price symbol mapping
-# Maps on-chain token names (e.g., "ETHST") to external oracle symbols (e.g., "ETH")
+# Token name to external price symbol mapping.
+# Keys are normalized (lowercased) token names from on-chain metadata.
 TOKEN_TO_EXTERNAL_SYMBOL = {
-    "ETHST": "ETH",
-    "WBTCST": "BTC",
+    "ethst": "ETH",
+    "wbtcst": "BTC",
+    "wstethst": "Wrapped wstETH",
+    "wrapped wsteth": "Wrapped wstETH",
 }
+
+# Fallback symbol mapping when a direct symbol is unavailable.
+# Useful for LST-style assets where external feeds can be sparse.
+TOKEN_PRICE_FALLBACK_SYMBOL = {
+    "rethst": "ETH",
+    "wrapped wsteth": "ETH",
+    "wstethst": "ETH",
+}
+
+
+def _normalize_symbol(value: str) -> str:
+    return str(value).strip().lower()
+
+
+def _get_fallback_symbol(symbol: str) -> str | None:
+    return TOKEN_PRICE_FALLBACK_SYMBOL.get(_normalize_symbol(symbol))
 
 
 def get_external_symbol(token_name: str) -> str:
@@ -34,7 +52,8 @@ def get_external_symbol(token_name: str) -> str:
     Returns:
         External symbol for price lookup (e.g., "ETH", "BTC", "USDST")
     """
-    return TOKEN_TO_EXTERNAL_SYMBOL.get(token_name, token_name)
+    normalized = _normalize_symbol(token_name)
+    return TOKEN_TO_EXTERNAL_SYMBOL.get(normalized, token_name.strip())
 
 
 class PriceOracle:
@@ -222,6 +241,30 @@ class PriceOracle:
         
         price_a = prices.get(symbol_a)
         price_b = prices.get(symbol_b)
+        
+        # Fallback for assets with sparse direct symbol coverage in external APIs.
+        if price_a is None:
+            fallback_a = _get_fallback_symbol(symbol_a)
+            if fallback_a:
+                fallback_prices = self.fetch_all_prices([fallback_a], force_refresh=force_refresh)
+                if fallback_a in fallback_prices:
+                    price_a = fallback_prices[fallback_a]
+                    logger.warning(
+                        "Using fallback oracle symbol %s for %s",
+                        fallback_a,
+                        token_a_name,
+                    )
+        if price_b is None:
+            fallback_b = _get_fallback_symbol(symbol_b)
+            if fallback_b:
+                fallback_prices = self.fetch_all_prices([fallback_b], force_refresh=force_refresh)
+                if fallback_b in fallback_prices:
+                    price_b = fallback_prices[fallback_b]
+                    logger.warning(
+                        "Using fallback oracle symbol %s for %s",
+                        fallback_b,
+                        token_b_name,
+                    )
         
         if price_a is None:
             raise ValueError(f"Failed to get price for {token_a_name} (symbol: {symbol_a})")
