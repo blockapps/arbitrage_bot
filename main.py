@@ -69,8 +69,9 @@ class ArbitrageBot:
         # Initialize executor for each pool
         for pool_config in pools:
             pool_addr = pool_config.get("address")
-            
-            pool = Pool(pool_addr, fee_bps=fee_bps)
+            pool_fee_bps = int(pool_config.get("fee_bps", fee_bps))
+
+            pool = Pool(pool_addr, fee_bps=pool_fee_bps)
             pool.fetch_pool_data()
             
             # Auto-register BlockApps tokens based on token names
@@ -85,7 +86,7 @@ class ArbitrageBot:
                 token_b=pool.token_b,
                 pool=pool,
                 oracle=self.oracle,
-                fee_bps=fee_bps,
+                fee_bps=pool_fee_bps,
                 min_profit_usd=min_profit_wei,
             )
             
@@ -93,7 +94,10 @@ class ArbitrageBot:
             ensure_pool_approvals(pool.token_a, pool.token_b, pool, self.vault_addr)
             
             self.executors.append(executor)
-            log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
+            log.info(
+                f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr} "
+                f"(isStable={pool.is_stable_pool()}, source=on-chain BlockApps-Pool.isStable)"
+            )
         
         # Pre-fetch prices for all tokens in all pools
         all_token_symbols = set()

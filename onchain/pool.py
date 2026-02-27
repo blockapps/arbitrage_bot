@@ -23,6 +23,13 @@ class PoolData:
     tokenB: 'Token'  # Reference to Token object
     tokenABalance: int  # Balance in wei (raw units)
     tokenBBalance: int  # Balance in wei (raw units)
+    isStable: bool  # True for stable pools, False for AMM pools
+    stableFee: int = 0
+    offpegFeeMultiplier: int = 0
+    initialA: int = 0
+    futureA: int = 0
+    initialATime: int = 0
+    futureATime: int = 0
 
 
 
@@ -51,6 +58,19 @@ class Pool:
         
         # Cache pool data
         self._pool_data: Optional[PoolData] = None
+        self.is_stable: bool = False
+
+    @staticmethod
+    def _to_int(value, default: int = 0) -> int:
+        if value is None:
+            return default
+        try:
+            return int(str(value))
+        except Exception:
+            try:
+                return int(float(value))
+            except Exception:
+                return default
     
     def fetch_pool_data(self, force_refresh: bool = False) -> PoolData:
         """
@@ -70,7 +90,8 @@ class Pool:
             # Build select query with nested balances and allowances for user
             # Use !left instead of !inner so we get token info even if no balances/allowances
             select_query = (
-                f'address,tokenABalance,tokenBBalance,'
+                f'address,tokenABalance,tokenBBalance,isStable,'
+                f'fee,offpegFeeMultiplier,initialA,futureA,initialATime,futureATime,'
                 f'tokenA:tokenA_fkey(address,_symbol,_name,'
                 f'balances:BlockApps-Token-_balances!left(key,value::text),'
                 f'allowances:BlockApps-Token-_allowances!left(key,key2,value::text)),'
@@ -140,12 +161,22 @@ class Pool:
             self.token_b.allowance = int(token_b_allowances[0].get('value', '0')) if token_b_allowances else 0
             
             # Create PoolData with references to token objects
+            is_stable_raw = pool_dict.get('isStable', False)
+            is_stable = str(is_stable_raw).lower() in ('true', '1', 't', 'yes')
+            self.is_stable = is_stable
             self._pool_data = PoolData(
                 address=pool_dict.get('address', self.address),
                 tokenA=self.token_a,
                 tokenB=self.token_b,
                 tokenABalance=int(pool_dict.get('tokenABalance', 0)),
-                tokenBBalance=int(float(pool_dict.get('tokenBBalance', 0)))  # Handle float conversion
+                tokenBBalance=int(float(pool_dict.get('tokenBBalance', 0))),  # Handle float conversion
+                isStable=self.is_stable,
+                stableFee=self._to_int(pool_dict.get('fee', 0)),
+                offpegFeeMultiplier=self._to_int(pool_dict.get('offpegFeeMultiplier', 0)),
+                initialA=self._to_int(pool_dict.get('initialA', 0)),
+                futureA=self._to_int(pool_dict.get('futureA', 0)),
+                initialATime=self._to_int(pool_dict.get('initialATime', 0)),
+                futureATime=self._to_int(pool_dict.get('futureATime', 0)),
             )
             
             return self._pool_data
@@ -173,6 +204,38 @@ class Pool:
         except Exception as e:
             logger.error(f"Failed to get reserves: {e}")
             raise
+
+    def is_stable_pool(self) -> bool:
+        """
+        Return pool type flag discovered from on-chain pool state.
+        """
+        if self._pool_data is None:
+            self.fetch_pool_data()
+        return self.is_stable
+
+    def get_stable_params(self) -> dict:
+        """
+        Return stable-pool parameters needed for contract-aligned quote math.
+        """
+        if self._pool_data is None:
+            self.fetch_pool_data()
+        p = self._pool_data
+        if not p or not p.isStable:
+            return {}
+
+        now = int(time.time())
+        amp = p.futureA
+        if p.futureATime > 0 and now < p.futureATime and p.initialATime < p.futureATime:
+            if p.futureA > p.initialA:
+                amp = p.initialA + ((p.futureA - p.initialA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+            else:
+                amp = p.initialA - ((p.initialA - p.futureA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+
+        return {
+            "amp": int(amp),
+            "fee": int(p.stableFee),
+            "offpeg_fee_multiplier": int(p.offpegFeeMultiplier),
+        }
     
     def get_price(self) -> int:
         """
