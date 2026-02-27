@@ -91,7 +91,6 @@ class Pool:
             # Use !left instead of !inner so we get token info even if no balances/allowances
             select_query = (
                 f'address,tokenABalance,tokenBBalance,isStable,'
-                f'fee,offpegFeeMultiplier,initialA,futureA,initialATime,futureATime,'
                 f'tokenA:tokenA_fkey(address,_symbol,_name,'
                 f'balances:BlockApps-Token-_balances!left(key,value::text),'
                 f'allowances:BlockApps-Token-_allowances!left(key,key2,value::text)),'
@@ -164,6 +163,7 @@ class Pool:
             is_stable_raw = pool_dict.get('isStable', False)
             is_stable = str(is_stable_raw).lower() in ('true', '1', 't', 'yes')
             self.is_stable = is_stable
+            stable_meta = self._fetch_stable_meta(client.strato_node_url, access_token) if is_stable else {}
             self._pool_data = PoolData(
                 address=pool_dict.get('address', self.address),
                 tokenA=self.token_a,
@@ -171,12 +171,12 @@ class Pool:
                 tokenABalance=int(pool_dict.get('tokenABalance', 0)),
                 tokenBBalance=int(float(pool_dict.get('tokenBBalance', 0))),  # Handle float conversion
                 isStable=self.is_stable,
-                stableFee=self._to_int(pool_dict.get('fee', 0)),
-                offpegFeeMultiplier=self._to_int(pool_dict.get('offpegFeeMultiplier', 0)),
-                initialA=self._to_int(pool_dict.get('initialA', 0)),
-                futureA=self._to_int(pool_dict.get('futureA', 0)),
-                initialATime=self._to_int(pool_dict.get('initialATime', 0)),
-                futureATime=self._to_int(pool_dict.get('futureATime', 0)),
+                stableFee=self._to_int(stable_meta.get('fee', 0)),
+                offpegFeeMultiplier=self._to_int(stable_meta.get('offpegFeeMultiplier', 0)),
+                initialA=self._to_int(stable_meta.get('initialA', 0)),
+                futureA=self._to_int(stable_meta.get('futureA', 0)),
+                initialATime=self._to_int(stable_meta.get('initialATime', 0)),
+                futureATime=self._to_int(stable_meta.get('futureATime', 0)),
             )
             
             return self._pool_data
@@ -184,6 +184,43 @@ class Pool:
         except Exception as e:
             logger.error(f"Failed to fetch pool data: {e}")
             raise
+
+    def _fetch_stable_meta(self, strato_node_url: str, access_token: str) -> dict:
+        """
+        Best-effort stable pool metadata lookup.
+        This must never break the base pool fetch flow.
+        """
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'address': f'eq.{self.address}',
+            'select': 'fee,offpegFeeMultiplier,initialA,futureA,initialATime,futureATime'
+        }
+
+        # Cirrus table names can differ by deployment; try likely candidates.
+        for table in ("BlockApps-StablePool", "StablePool"):
+            try:
+                response = requests.get(
+                    f'{strato_node_url}/cirrus/search/{table}',
+                    headers=headers,
+                    params=params,
+                    timeout=10000
+                )
+                if not response.ok:
+                    continue
+                data = response.json()
+                if data and len(data) > 0:
+                    return data[0]
+            except Exception:
+                continue
+
+        logger.warning(
+            "Stable pool metadata not available in Cirrus for %s; using conservative defaults",
+            self.address
+        )
+        return {}
     
     def get_reserves(self) -> Tuple[int, int]:
         """
@@ -230,12 +267,15 @@ class Pool:
                 amp = p.initialA + ((p.futureA - p.initialA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
             else:
                 amp = p.initialA - ((p.initialA - p.futureA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
-
-        return {
-            "amp": int(amp),
-            "fee": int(p.stableFee),
-            "offpeg_fee_multiplier": int(p.offpegFeeMultiplier),
-        }
+        # Only provide params that were actually discovered.
+        params = {}
+        if amp > 0:
+            params["amp"] = int(amp)
+        if p.stableFee > 0:
+            params["fee"] = int(p.stableFee)
+        if p.offpegFeeMultiplier > 0:
+            params["offpeg_fee_multiplier"] = int(p.offpegFeeMultiplier)
+        return params
     
     def get_price(self) -> int:
         """
