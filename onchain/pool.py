@@ -40,7 +40,9 @@ class Pool:
     def __init__(
         self,
         address: str,
-        fee_bps: int = 30
+        fee_bps: int = 30,
+        slippage_factor_amm: float = 0.96,
+        slippage_factor_stable: float = 0.92,
     ):
         """
         Initialize pool contract
@@ -48,9 +50,13 @@ class Pool:
         Args:
             address: Pool contract address
             fee_bps: Pool fee in basis points
+            slippage_factor_amm: Min-out multiplier for AMM swaps
+            slippage_factor_stable: Min-out multiplier for stable swaps
         """
         self.address = address
         self.fee_bps = fee_bps
+        self.slippage_factor_amm = self._normalize_slippage_factor(slippage_factor_amm)
+        self.slippage_factor_stable = self._normalize_slippage_factor(slippage_factor_stable)
         
         # Tokens will be initialized when fetch_pool_data() is called
         self.token_a: Optional[Token] = None
@@ -59,6 +65,17 @@ class Pool:
         # Cache pool data
         self._pool_data: Optional[PoolData] = None
         self.is_stable: bool = False
+
+    @staticmethod
+    def _normalize_slippage_factor(value: float, default: float = 0.96) -> float:
+        try:
+            factor = float(value)
+        except (TypeError, ValueError):
+            return default
+        # Keep factor in sane bounds for minAmountOut guard.
+        if factor <= 0 or factor > 1:
+            return default
+        return factor
 
     @staticmethod
     def _to_int(value, default: int = 0) -> int:
@@ -316,10 +333,12 @@ class Pool:
         deadline = int(time.time()) + 60
         
         # Build args matching contract signature
+        slippage_factor = self.slippage_factor_stable if self.is_stable else self.slippage_factor_amm
+        min_amount_out_guarded = int(min_amount_out * slippage_factor)
         args = {
             'isAToB': is_a_to_b,
             'amountIn': amount_in,
-            'minAmountOut': int(min_amount_out*0.96),
+            'minAmountOut': min_amount_out_guarded,
             'deadline': deadline
         }
         

@@ -62,6 +62,8 @@ class ArbitrageBot:
         trade_cfg = self.cfg["trading"]
         min_profit = Decimal(str(trade_cfg["min_profit"]))
         min_profit_wei = int(min_profit * WEI_SCALE)
+        slippage_factor_amm = float(trade_cfg.get("slippage_factor_amm", 0.96))
+        slippage_factor_stable = float(trade_cfg.get("slippage_factor_stable", 0.92))
         
         exec_cfg = self.cfg.get("execution", {})
         self.vault_addr = exec_cfg.get("vault_addr", "")
@@ -71,7 +73,14 @@ class ArbitrageBot:
             pool_addr = pool_config.get("address")
             pool_fee_bps = int(pool_config.get("fee_bps", fee_bps))
 
-            pool = Pool(pool_addr, fee_bps=pool_fee_bps)
+            pool_slippage_amm = float(pool_config.get("slippage_factor_amm", slippage_factor_amm))
+            pool_slippage_stable = float(pool_config.get("slippage_factor_stable", slippage_factor_stable))
+            pool = Pool(
+                pool_addr,
+                fee_bps=pool_fee_bps,
+                slippage_factor_amm=pool_slippage_amm,
+                slippage_factor_stable=pool_slippage_stable,
+            )
             pool.fetch_pool_data()
             
             # Auto-register BlockApps tokens based on token names
