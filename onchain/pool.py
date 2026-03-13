@@ -6,6 +6,7 @@ import logging
 import requests
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple
 
 from core.strato_client import strato_client
@@ -23,6 +24,8 @@ class PoolData:
     tokenB: 'Token'  # Reference to Token object
     tokenABalance: int  # Balance in wei (raw units)
     tokenBBalance: int  # Balance in wei (raw units)
+    aToBRatio: int  # Pool ratio tokenB per tokenA (wei scaled)
+    bToARatio: int  # Pool ratio tokenA per tokenB (wei scaled)
     isStable: bool  # True for stable pools, False for AMM pools
     stableFee: int = 0
     offpegFeeMultiplier: int = 0
@@ -88,6 +91,39 @@ class Pool:
                 return int(float(value))
             except Exception:
                 return default
+
+    @staticmethod
+    def _to_scaled_ratio(value, default: int = 0) -> int:
+        """
+        Parse pool ratio values to 1e18-scaled integer.
+        Handles both decimal strings (e.g. "0.9165") and already-scaled ints.
+        """
+        if value is None:
+            return default
+
+        text = str(value).strip()
+        if not text:
+            return default
+
+        # If ratio comes as decimal, scale it to wei.
+        if any(ch in text for ch in (".", "e", "E")):
+            try:
+                scaled = int(Decimal(text) * Decimal(WEI_SCALE))
+                return scaled if scaled > 0 else default
+            except (InvalidOperation, ValueError):
+                return default
+
+        # Integer path: value may already be wei-scaled or unscaled integer ratio.
+        try:
+            parsed = int(text)
+        except ValueError:
+            return default
+
+        if parsed <= 0:
+            return default
+
+        # Heuristic: small ints represent unscaled ratios (e.g. "1"), scale them.
+        return parsed * WEI_SCALE if parsed < 10**12 else parsed
     
     def fetch_pool_data(self, force_refresh: bool = False) -> PoolData:
         """
@@ -107,7 +143,7 @@ class Pool:
             # Build select query with nested balances and allowances for user
             # Use !left instead of !inner so we get token info even if no balances/allowances
             select_query = (
-                f'address,tokenABalance,tokenBBalance,isStable,'
+                f'address,tokenABalance,tokenBBalance,aToBRatio,bToARatio,isStable,'
                 f'tokenA:tokenA_fkey(address,_symbol,_name,'
                 f'balances:BlockApps-Token-_balances!left(key,value::text),'
                 f'allowances:BlockApps-Token-_allowances!left(key,key2,value::text)),'
@@ -185,8 +221,10 @@ class Pool:
                 address=pool_dict.get('address', self.address),
                 tokenA=self.token_a,
                 tokenB=self.token_b,
-                tokenABalance=int(pool_dict.get('tokenABalance', 0)),
-                tokenBBalance=int(float(pool_dict.get('tokenBBalance', 0))),  # Handle float conversion
+                tokenABalance=self._to_int(pool_dict.get('tokenABalance', 0)),
+                tokenBBalance=self._to_int(pool_dict.get('tokenBBalance', 0)),
+                aToBRatio=self._to_scaled_ratio(pool_dict.get('aToBRatio', 0)),
+                bToARatio=self._to_scaled_ratio(pool_dict.get('bToARatio', 0)),
                 isStable=self.is_stable,
                 stableFee=self._to_int(stable_meta.get('fee', 0)),
                 offpegFeeMultiplier=self._to_int(stable_meta.get('offpegFeeMultiplier', 0)),
@@ -306,6 +344,16 @@ class Pool:
             return 0
         # Price in wei scale: (reserve_b * 10^18) // reserve_a
         return (reserve_b * WEI_SCALE) // reserve_a
+
+    def get_stable_aligned_price(self) -> int:
+        """
+        Preferred pool price for stable pools: use pool ratio fields when available.
+        Falls back to reserve ratio for AMM pools or missing ratio fields.
+        """
+        pool_data = self.fetch_pool_data()
+        if pool_data.isStable and pool_data.aToBRatio > 0:
+            return pool_data.aToBRatio
+        return self.get_price()
     
     def swap(
         self,

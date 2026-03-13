@@ -133,13 +133,21 @@ class ArbitrageExecutor:
                 logger.warning(f"No arbitrage opportunity: No token balances")
                 return None
             
-            pool_price = (reserve_b * WEI_SCALE) // reserve_a
+            reserve_ratio_price = (reserve_b * WEI_SCALE) // reserve_a
+            is_stable_pool = self.pool.is_stable_pool()
+            pool_price = self.pool.get_stable_aligned_price() if is_stable_pool else reserve_ratio_price
             price_diff = oracle_price - pool_price
             price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
             
             logger.info(f"Pool price: {pool_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
             logger.info(f"Oracle price: {oracle_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
             logger.info(f"Price diff: {price_diff / WEI_SCALE:.6f} {self.token_b.symbol} ({price_diff_pct:.2f}%)")
+            if is_stable_pool:
+                logger.info(
+                    "Stable price trace: reserve-ratio=%.6f, stable-aligned-ratio=%.6f",
+                    reserve_ratio_price / WEI_SCALE,
+                    pool_price / WEI_SCALE
+                )
             
             # Use stable-aware sizing for stable pools and AMM closed-form sizing for AMM pools.
             common_kwargs = {
@@ -151,7 +159,6 @@ class ArbitrageExecutor:
                 "fee_bps": self.fee_bps,
                 "min_profit": min_profit_token_b,
             }
-            is_stable_pool = self.pool.is_stable_pool()
             logger.info(
                 f"pricing path selected: {'stable' if is_stable_pool else 'amm'} "
                 f"(isStable={is_stable_pool}, source=on-chain BlockApps-Pool.isStable)"
@@ -160,6 +167,7 @@ class ArbitrageExecutor:
                 reason, result = find_optimal_trade_stable_auto(
                     **common_kwargs,
                     stable_params=self.pool.get_stable_params(),
+                    pool_price_xy_override=pool_price,
                 )
             else:
                 reason, result = find_optimal_trade_auto(**common_kwargs)

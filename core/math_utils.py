@@ -256,7 +256,8 @@ def find_optimal_trade_stable_auto(
     balance_y: int,
     fee_bps: int,
     min_profit: int,        # token Y wei (caller converts from USD)
-    stable_params: Optional[dict] = None
+    stable_params: Optional[dict] = None,
+    pool_price_xy_override: Optional[int] = None
 ) -> Tuple[Optional[str], Optional[Tuple[str, int, int, int]]]:
     """
     Stable-pool arbitrage sizing heuristic.
@@ -269,7 +270,7 @@ def find_optimal_trade_stable_auto(
     if not (0 <= fee_bps < BPS_DENOM):
         return ("Invalid fee_bps ({})".format(fee_bps), None)
 
-    pool_price_xy = (reserve_y * WEI_SCALE) // reserve_x
+    pool_price_xy = int(pool_price_xy_override) if pool_price_xy_override and pool_price_xy_override > 0 else (reserve_y * WEI_SCALE) // reserve_x
     if pool_price_xy <= 0:
         return ("Invalid pool price ({})".format(pool_price_xy), None)
 
