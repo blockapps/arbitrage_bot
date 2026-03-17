@@ -32,7 +32,7 @@ class CDP:
         try:
             response = api_request(
                 "GET",
-                f"{self._base_url}api/cdp/liquidatable",
+                f"{self._base_url}/api/cdp/liquidatable",
                 headers=self._headers(),
             )
             return response.json()
@@ -58,7 +58,7 @@ class CDP:
         """
         response = api_request(
             "POST",
-            f"{self._base_url}api/cdp/liquidate",
+            f"{self._base_url}/api/cdp/liquidate",
             headers=self._headers(),
             json={
                 "collateralAsset": collateral_asset,
