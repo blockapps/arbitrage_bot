@@ -60,8 +60,11 @@ class LiquidationExecutor:
                 borrower = pos.get("borrower", "")
                 debt_to_cover = pos.get("debtAmount", 0)
 
-                if not collateral_asset or not borrower or not debt_to_cover:
+                if not collateral_asset or not borrower:
                     logger.warning(f"Skipping position with missing fields: {pos}")
+                    continue
+
+                if int(debt_to_cover) <= 0:
                     continue
 
 
