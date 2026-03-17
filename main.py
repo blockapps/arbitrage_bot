@@ -16,6 +16,7 @@ from core.constants import WEI_SCALE, BLOCKAPPS_ORACLE_TOKENS
 from onchain.pool import Pool
 from market.oracle import PriceOracle, get_external_symbol
 from engine.arb_executor import ArbitrageExecutor
+from engine.liquidation_executor import LiquidationExecutor
 from engine.helpers import ensure_pool_approvals
 
 logging.basicConfig(
@@ -35,6 +36,7 @@ class ArbitrageBot:
         self.interval = cfg.get("execution", {}).get("execution_interval", 10)
         self.running = False
         self.executors = []  # List of executors, one per pool
+        self.liquidation_executor = None
 
     def init_components(self):
         c = strato_client()
@@ -42,80 +44,87 @@ class ArbitrageBot:
             raise RuntimeError("cannot connect to blockchain")
 
         pools = self.cfg.get("pools", [])
-        if not pools:
-            raise RuntimeError("No pools configured in config.yaml")
-        
-        # Validate all pool configs
-        for i, pool_config in enumerate(pools):
-            pool_addr = pool_config.get("address")
+    
+        if not pools: 
+            log.info("no pools configured in config.yaml")
+        else: 
+            # Validate all pool configs
+            for i, pool_config in enumerate(pools):
+                pool_addr = pool_config.get("address")
+                
+                if not pool_addr:
+                    raise RuntimeError(f"Pool {i+1}: address is required in config.yaml")
             
-            if not pool_addr:
-                raise RuntimeError(f"Pool {i+1}: address is required in config.yaml")
-        
-        fee_bps = self.cfg["trading"]["fee_bps"]
-        oracle_cfg = self.cfg["oracle"]
-        self.oracle = PriceOracle(
-            timeout=oracle_cfg["timeout"],
-            blockapps_price_oracle=oracle_cfg.get("blockapps_price_oracle", "")
-        )
-
-        trade_cfg = self.cfg["trading"]
-        min_profit = Decimal(str(trade_cfg["min_profit"]))
-        min_profit_wei = int(min_profit * WEI_SCALE)
-        
-        exec_cfg = self.cfg.get("execution", {})
-        self.vault_addr = exec_cfg.get("vault_addr", "")
-
-        # Initialize executor for each pool
-        for pool_config in pools:
-            pool_addr = pool_config.get("address")
-            
-            pool = Pool(pool_addr, fee_bps=fee_bps)
-            pool.fetch_pool_data()
-            
-            # Auto-register BlockApps tokens based on token names
-            # These use the on-chain BlockApps PriceOracle instead of Alchemy
-            for token in [pool.token_a, pool.token_b]:
-                external_symbol = get_external_symbol(token.name)
-                if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
-                    self.oracle.register_blockapps_token(external_symbol, token.address)
-            
-            executor = ArbitrageExecutor(
-                token_a=pool.token_a,
-                token_b=pool.token_b,
-                pool=pool,
-                oracle=self.oracle,
-                fee_bps=fee_bps,
-                min_profit_usd=min_profit_wei,
+            fee_bps = self.cfg["trading"]["fee_bps"]
+            oracle_cfg = self.cfg["oracle"]
+            self.oracle = PriceOracle(
+                timeout=oracle_cfg["timeout"],
+                blockapps_price_oracle=oracle_cfg.get("blockapps_price_oracle", "")
             )
+
+            trade_cfg = self.cfg["trading"]
+            min_profit = Decimal(str(trade_cfg["min_profit"]))
+            min_profit_wei = int(min_profit * WEI_SCALE)
             
-            # Ensure pool approvals
-            ensure_pool_approvals(pool.token_a, pool.token_b, pool, self.vault_addr)
+            exec_cfg = self.cfg.get("execution", {})
+            self.vault_addr = exec_cfg.get("vault_addr", "")
+
+            # Initialize executor for each pool
+            for pool_config in pools:
+                pool_addr = pool_config.get("address")
+                
+                pool = Pool(pool_addr, fee_bps=fee_bps)
+                pool.fetch_pool_data()
+                
+                # Auto-register BlockApps tokens based on token names
+                # These use the on-chain BlockApps PriceOracle instead of Alchemy
+                for token in [pool.token_a, pool.token_b]:
+                    external_symbol = get_external_symbol(token.name)
+                    if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
+                        self.oracle.register_blockapps_token(external_symbol, token.address)
+                
+                executor = ArbitrageExecutor(
+                    token_a=pool.token_a,
+                    token_b=pool.token_b,
+                    pool=pool,
+                    oracle=self.oracle,
+                    fee_bps=fee_bps,
+                    min_profit_usd=min_profit_wei,
+                )
+                
+                # Ensure pool approvals
+                ensure_pool_approvals(pool.token_a, pool.token_b, pool, self.vault_addr)
+                
+                self.executors.append(executor)
+                log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
             
-            self.executors.append(executor)
-            log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
-        
-        # Pre-fetch prices for all tokens in all pools
-        all_token_symbols = set()
-        for executor in self.executors:
-            all_token_symbols.add(get_external_symbol(executor.token_a.name))
-            all_token_symbols.add(get_external_symbol(executor.token_b.name))
-        
-        if all_token_symbols:
-            self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
-        
+            # Pre-fetch prices for all tokens in all pools
+            all_token_symbols = set()
+            for executor in self.executors:
+                all_token_symbols.add(get_external_symbol(executor.token_a.name))
+                all_token_symbols.add(get_external_symbol(executor.token_b.name))
+            
+            if all_token_symbols:
+                self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
+
+        # Initialize liquidation executor if enabled
+        liq_cfg = self.cfg.get("liquidation", {})
+        if liq_cfg.get("enabled", False):
+            self.liquidation_executor = LiquidationExecutor()
+            log.info("CDP liquidation scanning enabled")
+
         if self.dry_run:
             log.info("dry-run mode enabled")
 
     def scan_once(self):
-        """Scan all pools for opportunities and execute the first profitable one found"""
+        """Scan all pools for arbitrage and CDP positions for liquidation"""
+        # --- Arbitrage scan ---
         for i, executor in enumerate(self.executors):
             opp = executor.scan_for_opportunity()
-            
-            # Add newline between pools (but not after the last one)
+
             if i < len(self.executors) - 1:
                 print()
-            
+
             if not opp:
                 continue
 
@@ -126,7 +135,26 @@ class ArbitrageBot:
             res = executor.execute_opportunity(opp)
             log.info(f"exec result on {executor.pool.token_a.symbol}-{executor.pool.token_b.symbol}: {res.success}")
             return res.success
-        
+
+        # --- Liquidation scan ---
+        if self.liquidation_executor:
+            print()
+            opportunities = self.liquidation_executor.scan_for_opportunities()
+            for opp in opportunities:
+                if self.dry_run:
+                    log.info(
+                        f"dry-run: would liquidate borrower={opp.borrower[:16]}… "
+                        f"collateral={opp.collateral_asset[:16]}… "
+                        f"debt={opp.debt_to_cover}"
+                    )
+                    continue
+
+                res = self.liquidation_executor.execute_liquidation(opp)
+                if res.success:
+                    log.info(f"liquidation succeeded for borrower={opp.borrower[:16]}…")
+                else:
+                    log.warning(f"liquidation failed for borrower={opp.borrower[:16]}…: {res.error_message}")
+
         return False
 
     def run(self):
