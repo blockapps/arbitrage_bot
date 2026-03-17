@@ -11,6 +11,8 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 from onchain.cdp import CDP
+from engine.helpers import update_cumulative_profit
+from core.constants import WEI_SCALE
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,11 @@ class LiquidationExecutor:
 
             elapsed = time.time() - start_time
             logger.info(f"Liquidation succeeded in {elapsed:.2f}s: {result}")
+
+            # profit = debt_to_cover * closeFactorBps * liquidationPenlatyBps
+            # profit = debt_to_cover * 0.5 * 0.1
+            profit_wei = int(opp.debt_to_cover) * 5 // 100
+            update_cumulative_profit(profit_wei, WEI_SCALE, file_path="liquidation_profit.json")
 
             return LiquidationResult(
                 success=True,
