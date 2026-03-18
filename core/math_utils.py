@@ -223,17 +223,23 @@ def _stable_quote_output(
     is_x_to_y: bool,
     amp: int,
     fee: int,
-    offpeg_fee_multiplier: int
+    offpeg_fee_multiplier: int,
+    rate_x: int = WEI_SCALE,
+    rate_y: int = WEI_SCALE,
 ) -> int:
     if dx <= 0 or reserve_x <= 0 or reserve_y <= 0 or amp <= 0:
         return 0
 
-    xp0 = reserve_x
-    xp1 = reserve_y
+    xp0 = (rate_x * reserve_x) // WEI_SCALE
+    xp1 = (rate_y * reserve_y) // WEI_SCALE
+
     i, j = (0, 1) if is_x_to_y else (1, 0)
+    rate_i = rate_x if i == 0 else rate_y
+    rate_j = rate_y if j == 1 else rate_x
     xp_i = xp0 if i == 0 else xp1
     xp_j = xp1 if j == 1 else xp0
-    x = xp_i + dx  # rates ~= 1e18 for these pools, so xp increment equals token units
+
+    x = xp_i + (dx * rate_i) // WEI_SCALE
     d = _stable_get_d(xp0, xp1, amp)
     if d <= 0:
         return 0
@@ -244,7 +250,7 @@ def _stable_quote_output(
     if dy <= 0:
         return 0
     dy_fee = (dy * _stable_dynamic_fee((xp_i + x) // 2, (xp_j + y) // 2, fee, offpeg_fee_multiplier)) // STABLE_FEE_DENOMINATOR
-    dy_net = dy - dy_fee
+    dy_net = ((dy - dy_fee) * WEI_SCALE) // rate_j
     return dy_net if dy_net > 0 else 0
 
 
@@ -260,8 +266,7 @@ def find_optimal_trade_stable_auto(
     pool_price_xy_override: Optional[int] = None
 ) -> Tuple[Optional[str], Optional[Tuple[str, int, int, int]]]:
     """
-    Stable-pool arbitrage sizing heuristic.
-    Uses a bounded depth (0.10% to 5.00% of reserve) based on price divergence.
+    Stable-pool arbitrage sizing via ternary search for profit-maximizing trade.
     """
     if reserve_x <= 0 or reserve_y <= 0 or oracle_price_xy <= 0:
         return ("Invalid inputs (reserve_x={}, reserve_y={}, oracle_price_xy={})".format(reserve_x, reserve_y, oracle_price_xy), None)
@@ -274,58 +279,81 @@ def find_optimal_trade_stable_auto(
     if pool_price_xy <= 0:
         return ("Invalid pool price ({})".format(pool_price_xy), None)
 
-    diff = abs(pool_price_xy - oracle_price_xy)
-    divergence_bps = (diff * BPS_DENOM) // oracle_price_xy
-    # Keep stable trades conservative while still responsive to mispricing.
-    depth_bps = max(10, min(500, divergence_bps))  # 0.10% .. 5.00%
-
     params = stable_params or {}
     amp = int(params.get("amp", 100 * STABLE_A_PRECISION))
     fee_1e10 = int(params.get("fee", fee_bps * 1_000_000))
     offpeg_fee_multiplier = int(params.get("offpeg_fee_multiplier", STABLE_FEE_DENOMINATOR))
+    rate_x = int(params.get("rate_a", WEI_SCALE))
+    rate_y = int(params.get("rate_b", WEI_SCALE))
+
+    quote_kwargs = dict(
+        reserve_x=reserve_x, reserve_y=reserve_y,
+        amp=amp, fee=fee_1e10, offpeg_fee_multiplier=offpeg_fee_multiplier,
+        rate_x=rate_x, rate_y=rate_y,
+    )
 
     if pool_price_xy < oracle_price_xy:
         # Pool underprices X -> buy X with Y (Y->X)
-        dy_cap = (reserve_y * depth_bps) // BPS_DENOM
-        dy = min(dy_cap, balance_y)
-        if dy <= 0:
-            return ("No input available for Y->X (dy_cap={}, balance_y={})".format(dy_cap, balance_y), None)
-        x_out = _stable_quote_output(
-            dx=dy,
-            reserve_x=reserve_x,
-            reserve_y=reserve_y,
-            is_x_to_y=False,
-            amp=amp,
-            fee=fee_1e10,
-            offpeg_fee_multiplier=offpeg_fee_multiplier,
-        )
+        max_input = min(reserve_y // 2, balance_y) if balance_y > 0 else 0
+        if max_input <= 0:
+            return ("No Y balance for Y->X (balance_y={})".format(balance_y), None)
+
+        def buy_profit(dy):
+            x_out = _stable_quote_output(dx=dy, is_x_to_y=False, **quote_kwargs)
+            if x_out <= 0:
+                return -(dy or 1)
+            return (x_out * oracle_price_xy) // WEI_SCALE - dy
+
+        lo, hi = 1, max_input
+        for _ in range(128):
+            if hi - lo < 3:
+                break
+            m1 = lo + (hi - lo) // 3
+            m2 = hi - (hi - lo) // 3
+            if buy_profit(m1) < buy_profit(m2):
+                lo = m1
+            else:
+                hi = m2
+
+        best_dy = (lo + hi) // 2
+        x_out = _stable_quote_output(dx=best_dy, is_x_to_y=False, **quote_kwargs)
         if x_out <= 0:
-            return ("No output for Y->X (x_out={})".format(x_out), None)
-        profit_y = (x_out * oracle_price_xy) // WEI_SCALE - dy
+            return ("No output for Y->X", None)
+        profit_y = (x_out * oracle_price_xy) // WEI_SCALE - best_dy
         if profit_y > 0 and profit_y >= min_profit:
-            return (None, ("Y->X", dy, x_out, profit_y))
+            return (None, ("Y->X", best_dy, x_out, profit_y))
         return ("Profit too low for Y->X (profit={:.6f}, min_profit={:.6f})".format(profit_y / WEI_SCALE, min_profit / WEI_SCALE), None)
 
     if pool_price_xy > oracle_price_xy:
         # Pool overprices X -> sell X for Y (X->Y)
-        dx_cap = (reserve_x * depth_bps) // BPS_DENOM
-        dx = min(dx_cap, balance_x)
-        if dx <= 0:
-            return ("No input available for X->Y (dx_cap={}, balance_x={})".format(dx_cap, balance_x), None)
-        y_out = _stable_quote_output(
-            dx=dx,
-            reserve_x=reserve_x,
-            reserve_y=reserve_y,
-            is_x_to_y=True,
-            amp=amp,
-            fee=fee_1e10,
-            offpeg_fee_multiplier=offpeg_fee_multiplier,
-        )
+        max_input = min(reserve_x // 2, balance_x) if balance_x > 0 else 0
+        if max_input <= 0:
+            return ("No X balance for X->Y (balance_x={})".format(balance_x), None)
+
+        def sell_profit(dx):
+            y_out = _stable_quote_output(dx=dx, is_x_to_y=True, **quote_kwargs)
+            if y_out <= 0:
+                return -(dx or 1)
+            return y_out - (dx * oracle_price_xy) // WEI_SCALE
+
+        lo, hi = 1, max_input
+        for _ in range(128):
+            if hi - lo < 3:
+                break
+            m1 = lo + (hi - lo) // 3
+            m2 = hi - (hi - lo) // 3
+            if sell_profit(m1) < sell_profit(m2):
+                lo = m1
+            else:
+                hi = m2
+
+        best_dx = (lo + hi) // 2
+        y_out = _stable_quote_output(dx=best_dx, is_x_to_y=True, **quote_kwargs)
         if y_out <= 0:
-            return ("No output for X->Y (y_out={})".format(y_out), None)
-        profit_y = y_out - (dx * oracle_price_xy) // WEI_SCALE
+            return ("No output for X->Y", None)
+        profit_y = y_out - (best_dx * oracle_price_xy) // WEI_SCALE
         if profit_y > 0 and profit_y >= min_profit:
-            return (None, ("X->Y", dx, y_out, profit_y))
+            return (None, ("X->Y", best_dx, y_out, profit_y))
         return ("Profit too low for X->Y (profit={:.6f}, min_profit={:.6f})".format(profit_y / WEI_SCALE, min_profit / WEI_SCALE), None)
 
     return ("Pool price equals oracle price (no arbitrage opportunity)", None)

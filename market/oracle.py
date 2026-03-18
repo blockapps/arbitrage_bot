@@ -23,6 +23,8 @@ TOKEN_TO_EXTERNAL_SYMBOL = {
     "wbtcst": "BTC",
     "wstethst": "Wrapped wstETH",
     "wrapped wsteth": "Wrapped wstETH",
+    "strato wsteth": "STRATO wstETH",
+    "strato reth": "STRATO rETH",
 }
 
 # Fallback symbol mapping when a direct symbol is unavailable.
@@ -31,6 +33,8 @@ TOKEN_PRICE_FALLBACK_SYMBOL = {
     "rethst": "ETH",
     "wrapped wsteth": "ETH",
     "wstethst": "ETH",
+    "strato reth": "ETH",
+    "strato wsteth": "ETH",
 }
 
 

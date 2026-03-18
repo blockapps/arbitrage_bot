@@ -164,9 +164,13 @@ class ArbitrageExecutor:
                 f"(isStable={is_stable_pool}, source=on-chain BlockApps-Pool.isStable)"
             )
             if is_stable_pool:
+                stable_params = self.pool.get_stable_params()
+                stable_params["rate_a"] = price_a
+                stable_params["rate_b"] = price_b
+                common_kwargs["min_profit"] = min_profit_token_b // 10
                 reason, result = find_optimal_trade_stable_auto(
                     **common_kwargs,
-                    stable_params=self.pool.get_stable_params(),
+                    stable_params=stable_params,
                     pool_price_xy_override=pool_price,
                 )
             else:

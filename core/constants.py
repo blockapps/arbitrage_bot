@@ -24,5 +24,6 @@ BLOCKAPPS_ORACLE_TOKENS = {
     "USDSST",
     "XAUTST",
     "rETHST",
-    
+    "STRATO rETH",
+    "STRATO wstETH",
 }
