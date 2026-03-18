@@ -1,6 +1,6 @@
-# Multi-Pool Arbitrage Bot
+# Multi-Pool Arbitrage & Liquidation Bot
 
-A Python-based arbitrage bot for detecting and executing price differences between AMM pools and external markets on the Strato blockchain. Supports multiple pools simultaneously.
+A Python-based bot for detecting and executing price differences between AMM pools and external markets on the Strato blockchain. Also scans for under-collateralized CDP (Collateralized Debt Position) positions and executes profitable liquidations. Supports multiple pools simultaneously.
 
 ## Project Structure
 
@@ -13,12 +13,14 @@ arbitrage_bot/
 │   └── math_utils.py    # Mathematical calculations (wei-based, closed-form optimal input)
 ├── onchain/           # Blockchain contracts
 │   ├── token.py       # Token wrapper
-│   └── pool.py        # AMM pool wrapper (includes position tracking)
+│   ├── pool.py        # AMM pool wrapper (includes position tracking)
+│   └── cdp.py         # CDP liquidation contract wrapper
 ├── market/            # Market data
 │   └── oracle.py      # Price oracle (Alchemy API)
-├── engine/            # Arbitrage logic
-│   ├── arb_executor.py # Opportunity detection and trade execution
-│   └── helpers.py     # Helper functions (approvals, gas checks, PnL checks, profit tracking)
+├── engine/            # Arbitrage & liquidation logic
+│   ├── arb_executor.py        # Opportunity detection and trade execution
+│   ├── liquidation_executor.py # CDP liquidation scanning and execution
+│   └── helpers.py             # Helper functions (approvals, gas checks, PnL checks, profit tracking)
 ├── config.yaml        # Configuration (multi-pool support)
 ├── main.py            # Main application
 ├── requirements.txt   # Python dependencies
@@ -83,6 +85,10 @@ arbitrage_bot/
    oracle:
      timeout: 10  # API request timeout in seconds
    
+   # CDP Liquidation Settings
+   liquidation:
+     enabled: true  # Enable CDP liquidation scanning
+
    # Execution Settings
    execution:
      execution_interval: 60  # seconds between scans
@@ -147,6 +153,15 @@ python main.py --config custom_config.yaml
    - Uses thread-safe file locking to prevent race conditions
    - Tracks both wei-scaled and USD values
 
+8. **CDP Liquidation Scanning**: When enabled, the bot also scans for under-collateralized CDP positions:
+   - Queries the `/api/cdp/liquidatable` endpoint for positions eligible for liquidation
+   - Filters out positions with missing fields or zero debt
+
+9. **Liquidation Execution**: For each liquidatable position, the bot:
+   - Calls the `/api/cdp/liquidate` endpoint with the collateral asset, borrower address, and debt to cover
+   - Estimates profit as `debtToCover × closeFactorBps × liquidationPenaltyBps` (currently 5% of debt)
+   - Tracks liquidation profit separately in `liquidation_profit.json`
+
 ## Features
 
 - **Multi-Pool Support**: Monitor and trade across multiple pools simultaneously
@@ -157,6 +172,7 @@ python main.py --config custom_config.yaml
 - **Thread-Safe Execution**: Uses locks to prevent concurrent execution
 - **Dry-Run Mode**: Safe testing mode enabled by default
 - **Cumulative Profit Tracking**: Tracks total profit across all trades in `profit.json`
+- **CDP Liquidation**: Scans for under-collateralized positions and executes profitable liquidations
 - **Detailed Logging**: Comprehensive logging with reasons for each decision
 
 ## Configuration
@@ -169,6 +185,9 @@ Each pool in the `pools` array requires:
 ### Trading Parameters
 - `fee_bps`: Pool fee in basis points (e.g., 30 = 0.3%)
 - `min_profit`: Minimum profit threshold in USD (e.g., 0.01 = $0.01)
+
+### Liquidation Settings
+- `enabled`: Enable or disable CDP liquidation scanning (default: `false`)
 
 ### Execution Settings
 - `execution_interval`: Seconds between scans (default: 60)
@@ -187,17 +206,22 @@ The bot provides detailed logging for each pool scan:
 2025-11-07 14:14:19,004 - INFO - Oracle price: 102489.875571 USDST per BTCST
 2025-11-07 14:14:19,004 - INFO - Price diff: -51.825789 USDST (-0.06%)
 2025-11-07 14:14:19,004 - INFO - No arbitrage opportunity found - No input available for X->Y (dx_opt=32959367722980, balance_x=0)
+
+2025-11-07 14:14:20,112 - INFO -   Liquidatable: borrower=0x1234abcd5678… collateral=0xdeadbeef0000… debt=50000000000000000000
+2025-11-07 14:14:20,112 - INFO - Found 1 liquidatable CDP position(s)
+2025-11-07 14:14:20,500 - INFO - Liquidation succeeded in 0.39s: {...}
 ```
 
 ## Files Generated
 
-- `profit.json`: Cumulative profit tracking file (created automatically)
+- `profit.json`: Cumulative arbitrage profit tracking file (created automatically)
   ```json
   {
     "cumulative_profit_wei": 10000000000000000,
     "cumulative_profit_usd": 0.01
   }
   ```
+- `liquidation_profit.json`: Cumulative liquidation profit tracking file (created automatically, same format as `profit.json`)
 
 ## Disclaimer
 
