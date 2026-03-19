@@ -79,7 +79,7 @@ class ArbitrageBot:
                 # Auto-register BlockApps tokens based on token names
                 # These use the on-chain BlockApps PriceOracle instead of Alchemy
                 for token in [pool.token_a, pool.token_b]:
-                    external_symbol = get_external_symbol(token.name)
+                    external_symbol = get_external_symbol(token.symbol)
                     if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
                         self.oracle.register_blockapps_token(external_symbol, token.address)
                 
@@ -101,8 +101,8 @@ class ArbitrageBot:
             # Pre-fetch prices for all tokens in all pools
             all_token_symbols = set()
             for executor in self.executors:
-                all_token_symbols.add(get_external_symbol(executor.token_a.name))
-                all_token_symbols.add(get_external_symbol(executor.token_b.name))
+                all_token_symbols.add(get_external_symbol(executor.token_a.symbol))
+                all_token_symbols.add(get_external_symbol(executor.token_b.symbol))
             
             if all_token_symbols:
                 self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
@@ -118,7 +118,9 @@ class ArbitrageBot:
 
     def scan_once(self):
         """Scan all pools for arbitrage and CDP positions for liquidation"""
-        # --- Arbitrage scan ---
+        any_executed = False
+
+        # --- Arbitrage scan (all pools every cycle) ---
         for i, executor in enumerate(self.executors):
             opp = executor.scan_for_opportunity()
 
@@ -128,13 +130,17 @@ class ArbitrageBot:
             if not opp:
                 continue
 
+            pool_label = f"{executor.pool.token_a.symbol}-{executor.pool.token_b.symbol}"
+
             if self.dry_run:
-                log.info(f"dry-run: would execute trade on {executor.pool.token_a.symbol}-{executor.pool.token_b.symbol} pool")
-                return True
+                log.info(f"dry-run: would execute trade on {pool_label} pool")
+                any_executed = True
+                continue
 
             res = executor.execute_opportunity(opp)
-            log.info(f"exec result on {executor.pool.token_a.symbol}-{executor.pool.token_b.symbol}: {res.success}")
-            return res.success
+            log.info(f"exec result on {pool_label}: {res.success}")
+            if res.success:
+                any_executed = True
 
         # --- Liquidation scan ---
         if self.liquidation_executor:
@@ -155,7 +161,7 @@ class ArbitrageBot:
                 else:
                     log.warning(f"liquidation failed for borrower={opp.borrower[:16]}…: {res.error_message}")
 
-        return False
+        return any_executed
 
     def run(self):
         self.running = True

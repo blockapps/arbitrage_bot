@@ -16,25 +16,24 @@ logger = logging.getLogger(__name__)
 # USDST is a stablecoin pegged to $1
 USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
 
-# Token name to external price symbol mapping
-# Maps on-chain token names (e.g., "ETHST") to external oracle symbols (e.g., "ETH")
+# Token symbol to external price symbol mapping
+# Maps on-chain token symbols to external oracle symbols when they differ
 TOKEN_TO_EXTERNAL_SYMBOL = {
-    "ETHST": "ETH",
-    "WBTCST": "BTC",
+    "WBTC": "BTC",
 }
 
 
-def get_external_symbol(token_name: str) -> str:
+def get_external_symbol(token_symbol: str) -> str:
     """
-    Get the external price oracle symbol for a token name.
+    Get the external price oracle symbol for a token.
     
     Args:
-        token_name: On-chain token name (e.g., "ETHST", "WBTCST", "USDST")
+        token_symbol: On-chain token symbol (e.g., "ETH", "BTC", "USDST")
         
     Returns:
         External symbol for price lookup (e.g., "ETH", "BTC", "USDST")
     """
-    return TOKEN_TO_EXTERNAL_SYMBOL.get(token_name, token_name)
+    return TOKEN_TO_EXTERNAL_SYMBOL.get(token_symbol, token_symbol)
 
 
 class PriceOracle:
@@ -195,16 +194,16 @@ class PriceOracle:
 
         return prices
     
-    def fetch_token_prices(self, token_a_name: str, token_b_name: str, force_refresh: bool = False) -> tuple[int, int]:
+    def fetch_token_prices(self, token_a_symbol: str, token_b_symbol: str, force_refresh: bool = False) -> tuple[int, int]:
         """
         Fetch prices for both tokens in a pool and return their prices.
         
-        Automatically converts token names (e.g., "ETHST", "WBTCST") to external 
-        price symbols (e.g., "ETH", "BTC") for oracle lookup.
+        Automatically converts on-chain token symbols to external price symbols
+        via TOKEN_TO_EXTERNAL_SYMBOL when they differ.
         
         Args:
-            token_a_name: Name of token A (e.g., "ETHST")
-            token_b_name: Name of token B (e.g., "WBTCST", "USDST")
+            token_a_symbol: Symbol of token A (e.g., "ETH")
+            token_b_symbol: Symbol of token B (e.g., "BTC", "USDST")
             force_refresh: If True, bypass cache
             
         Returns:
@@ -213,19 +212,17 @@ class PriceOracle:
         Raises:
             ValueError: If prices cannot be fetched for either token
         """
-        # Convert token names to external symbols
-        symbol_a = get_external_symbol(token_a_name)
-        symbol_b = get_external_symbol(token_b_name)
+        symbol_a = get_external_symbol(token_a_symbol)
+        symbol_b = get_external_symbol(token_b_symbol)
         
-        # Fetch both prices
         prices = self.fetch_all_prices([symbol_a, symbol_b], force_refresh=force_refresh)
         
         price_a = prices.get(symbol_a)
         price_b = prices.get(symbol_b)
         
         if price_a is None:
-            raise ValueError(f"Failed to get price for {token_a_name} (symbol: {symbol_a})")
+            raise ValueError(f"Failed to get price for {token_a_symbol} (external: {symbol_a})")
         if price_b is None:
-            raise ValueError(f"Failed to get price for {token_b_name} (symbol: {symbol_b})")
+            raise ValueError(f"Failed to get price for {token_b_symbol} (external: {symbol_b})")
         
         return price_a, price_b
