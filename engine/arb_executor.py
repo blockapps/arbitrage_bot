@@ -102,8 +102,8 @@ class ArbitrageExecutor:
             # Fetch prices for BOTH tokens in the pool
             try:
                 price_a, price_b = self.oracle.fetch_token_prices(
-                    self.token_a.name,
-                    self.token_b.name,
+                    self.token_a.symbol,
+                    self.token_b.symbol,
                     force_refresh=True
                 )
             except ValueError as e:
@@ -219,8 +219,8 @@ class ArbitrageExecutor:
             
             # Fetch fresh price_b from oracle for USD conversion
             _, price_b = self.oracle.fetch_token_prices(
-                self.token_a.name,
-                self.token_b.name,
+                self.token_a.symbol,
+                self.token_b.symbol,
                 force_refresh=True
             )
             
