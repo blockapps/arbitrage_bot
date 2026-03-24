@@ -33,6 +33,12 @@ class PoolData:
     futureA: int = 0
     initialATime: int = 0
     futureATime: int = 0
+    rateMultiplierA: int = 0
+    rateMultiplierB: int = 0
+    adminBalanceA: int = 0
+    adminBalanceB: int = 0
+    rateOraclePriceA: int = 0
+    rateOraclePriceB: int = 0
 
 
 
@@ -216,7 +222,11 @@ class Pool:
             is_stable_raw = pool_dict.get('isStable', False)
             is_stable = str(is_stable_raw).lower() in ('true', '1', 't', 'yes')
             self.is_stable = is_stable
-            stable_meta = self._fetch_stable_meta(client.strato_node_url, access_token) if is_stable else {}
+            token_a_addr = token_a_dict.get('address', '')
+            token_b_addr = token_b_dict.get('address', '')
+            stable_meta = self._fetch_stable_meta(
+                client.strato_node_url, access_token, token_a_addr, token_b_addr
+            ) if is_stable else {}
             self._pool_data = PoolData(
                 address=pool_dict.get('address', self.address),
                 tokenA=self.token_a,
@@ -232,6 +242,12 @@ class Pool:
                 futureA=self._to_int(stable_meta.get('futureA', 0)),
                 initialATime=self._to_int(stable_meta.get('initialATime', 0)),
                 futureATime=self._to_int(stable_meta.get('futureATime', 0)),
+                rateMultiplierA=self._to_int(stable_meta.get('rateMultiplierA', 0)),
+                rateMultiplierB=self._to_int(stable_meta.get('rateMultiplierB', 0)),
+                adminBalanceA=self._to_int(stable_meta.get('adminBalanceA', 0)),
+                adminBalanceB=self._to_int(stable_meta.get('adminBalanceB', 0)),
+                rateOraclePriceA=self._to_int(stable_meta.get('rateOraclePriceA', 0)),
+                rateOraclePriceB=self._to_int(stable_meta.get('rateOraclePriceB', 0)),
             )
             
             return self._pool_data
@@ -240,10 +256,13 @@ class Pool:
             logger.error(f"Failed to fetch pool data: {e}")
             raise
 
-    def _fetch_stable_meta(self, strato_node_url: str, access_token: str) -> dict:
+    def _fetch_stable_meta(
+        self, strato_node_url: str, access_token: str,
+        token_a_addr: str = "", token_b_addr: str = ""
+    ) -> dict:
         """
-        Best-effort stable pool metadata lookup.
-        This must never break the base pool fetch flow.
+        Best-effort stable pool metadata lookup including mapping tables
+        for rateMultipliers, adminBalances, and rateOracles.
         """
         headers = {
             'Authorization': f'Bearer {access_token}',
@@ -254,7 +273,9 @@ class Pool:
             'select': 'fee,offpegFeeMultiplier,initialA,futureA,initialATime,futureATime'
         }
 
-        # Cirrus table names can differ by deployment; try likely candidates.
+        result = {}
+        resolved_table = None
+
         for table in ("BlockApps-StablePool", "StablePool"):
             try:
                 response = requests.get(
@@ -267,15 +288,97 @@ class Pool:
                     continue
                 data = response.json()
                 if data and len(data) > 0:
-                    return data[0]
+                    result = data[0]
+                    resolved_table = table
+                    break
             except Exception:
                 continue
 
-        logger.warning(
-            "Stable pool metadata not available in Cirrus for %s; using conservative defaults",
-            self.address
-        )
-        return {}
+        if not resolved_table:
+            logger.warning(
+                "Stable pool metadata not available in Cirrus for %s; using conservative defaults",
+                self.address
+            )
+            return result
+
+        if token_a_addr and token_b_addr:
+            self._fetch_stable_mappings(
+                strato_node_url, headers, resolved_table,
+                token_a_addr, token_b_addr, result
+            )
+
+        return result
+
+    def _fetch_stable_mappings(
+        self, strato_node_url: str, headers: dict, table_prefix: str,
+        token_a_addr: str, token_b_addr: str, result: dict
+    ) -> None:
+        """Fetch rateMultipliers, adminBalances, and rateOracles from mapping sub-tables."""
+        for token_addr, suffix in [(token_a_addr, 'A'), (token_b_addr, 'B')]:
+            val = self._fetch_mapping_value(
+                strato_node_url, headers, table_prefix, 'rateMultipliers', token_addr
+            )
+            if val is not None:
+                result[f'rateMultiplier{suffix}'] = val
+
+            val = self._fetch_mapping_value(
+                strato_node_url, headers, table_prefix, 'adminBalances', token_addr
+            )
+            if val is not None:
+                result[f'adminBalance{suffix}'] = val
+
+            oracle_addr = self._fetch_mapping_value(
+                strato_node_url, headers, table_prefix, 'rateOracles', token_addr
+            )
+            if oracle_addr and str(oracle_addr).replace('0', '') != '':
+                price = self._fetch_oracle_price(
+                    strato_node_url, headers, str(oracle_addr), token_addr
+                )
+                if price is not None and int(price) > 0:
+                    result[f'rateOraclePrice{suffix}'] = price
+
+    def _fetch_mapping_value(
+        self, strato_node_url: str, headers: dict,
+        table_prefix: str, mapping_name: str, key: str
+    ):
+        """Fetch a single value from a StablePool mapping sub-table."""
+        url = f'{strato_node_url}/cirrus/search/{table_prefix}-{mapping_name}'
+        params = {
+            'address': f'eq.{self.address}',
+            'key': f'eq.{key}',
+            'select': 'value'
+        }
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10000)
+            if response.ok:
+                data = response.json()
+                if data and len(data) > 0:
+                    return data[0].get('value')
+        except Exception as e:
+            logger.debug("Failed to fetch %s-%s for key %s: %s", table_prefix, mapping_name, key, e)
+        return None
+
+    def _fetch_oracle_price(
+        self, strato_node_url: str, headers: dict,
+        oracle_address: str, token_address: str
+    ):
+        """Fetch asset price from an on-chain PriceOracle contract via Cirrus."""
+        for table in ("BlockApps-PriceOracle-prices", "PriceOracle-prices"):
+            url = f'{strato_node_url}/cirrus/search/{table}'
+            params = {
+                'address': f'eq.{oracle_address}',
+                'key': f'eq.{token_address}',
+                'select': 'value'
+            }
+            try:
+                response = requests.get(url, headers=headers, params=params, timeout=10000)
+                if response.ok:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        return data[0].get('value')
+            except Exception:
+                continue
+        return None
     
     def get_reserves(self) -> Tuple[int, int]:
         """
@@ -307,7 +410,9 @@ class Pool:
 
     def get_stable_params(self) -> dict:
         """
-        Return stable-pool parameters needed for contract-aligned quote math.
+        Return stable-pool parameters needed for contract-aligned quote math,
+        including stored rates computed as rateMultiplier * oraclePrice / PRECISION
+        to match the contract's _storedRates().
         """
         if self._pool_data is None:
             self.fetch_pool_data()
@@ -322,7 +427,7 @@ class Pool:
                 amp = p.initialA + ((p.futureA - p.initialA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
             else:
                 amp = p.initialA - ((p.initialA - p.futureA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
-        # Only provide params that were actually discovered.
+
         params = {}
         if amp > 0:
             params["amp"] = int(amp)
@@ -330,7 +435,32 @@ class Pool:
             params["fee"] = int(p.stableFee)
         if p.offpegFeeMultiplier > 0:
             params["offpeg_fee_multiplier"] = int(p.offpegFeeMultiplier)
+
+        rate_mult_a = p.rateMultiplierA if p.rateMultiplierA > 0 else WEI_SCALE
+        oracle_price_a = p.rateOraclePriceA if p.rateOraclePriceA > 0 else WEI_SCALE
+        params["rate_a"] = (rate_mult_a * oracle_price_a) // WEI_SCALE
+
+        rate_mult_b = p.rateMultiplierB if p.rateMultiplierB > 0 else WEI_SCALE
+        oracle_price_b = p.rateOraclePriceB if p.rateOraclePriceB > 0 else WEI_SCALE
+        params["rate_b"] = (rate_mult_b * oracle_price_b) // WEI_SCALE
+
+        logger.info(
+            "Stable params: amp=%s, fee=%s, offpeg=%s, rate_a=%s, rate_b=%s",
+            params.get("amp"), params.get("fee"), params.get("offpeg_fee_multiplier"),
+            params.get("rate_a"), params.get("rate_b"),
+        )
+
         return params
+
+    def get_effective_reserves(self) -> Tuple[int, int]:
+        """
+        Get effective pool reserves (tokenBalances - adminBalances) to match
+        the contract's _balances() used in swap math.
+        """
+        pool_data = self.fetch_pool_data()
+        reserve_a = max(0, pool_data.tokenABalance - pool_data.adminBalanceA)
+        reserve_b = max(0, pool_data.tokenBBalance - pool_data.adminBalanceB)
+        return reserve_a, reserve_b
     
     def get_price(self) -> int:
         """

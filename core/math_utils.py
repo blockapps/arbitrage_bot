@@ -294,7 +294,10 @@ def find_optimal_trade_stable_auto(
 
     if pool_price_xy < oracle_price_xy:
         # Pool underprices X -> buy X with Y (Y->X)
-        max_input = min(reserve_y // 2, balance_y) if balance_y > 0 else 0
+        # Wallet balance is the only cap; the ternary search on the concave
+        # profit function naturally finds the optimal size without an
+        # artificial reserve-fraction limit (which is too tight for StableSwap).
+        max_input = balance_y if balance_y > 0 else 0
         if max_input <= 0:
             return ("No Y balance for Y->X (balance_y={})".format(balance_y), None)
 
@@ -326,7 +329,7 @@ def find_optimal_trade_stable_auto(
 
     if pool_price_xy > oracle_price_xy:
         # Pool overprices X -> sell X for Y (X->Y)
-        max_input = min(reserve_x // 2, balance_x) if balance_x > 0 else 0
+        max_input = balance_x if balance_x > 0 else 0
         if max_input <= 0:
             return ("No X balance for X->Y (balance_x={})".format(balance_x), None)
 

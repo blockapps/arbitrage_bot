@@ -16,25 +16,23 @@ logger = logging.getLogger(__name__)
 # USDST is a stablecoin pegged to $1
 USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
 
-# Token name to external price symbol mapping.
-# Keys are normalized (lowercased) token names from on-chain metadata.
+# Token symbol → external price symbol mapping.
+# Keys are normalized (lowercased) on-chain token symbols.
 TOKEN_TO_EXTERNAL_SYMBOL = {
     "ethst": "ETH",
     "wbtcst": "BTC",
     "wstethst": "Wrapped wstETH",
-    "wrapped wsteth": "Wrapped wstETH",
-    "strato wsteth": "STRATO wstETH",
-    "strato reth": "STRATO rETH",
+    "wsteth": "STRATO wstETH",
+    "reth": "STRATO rETH",
 }
 
-# Fallback symbol mapping when a direct symbol is unavailable.
-# Useful for LST-style assets where external feeds can be sparse.
+# Fallback symbol mapping when a direct price feed is unavailable.
+# LST-style assets fall back to their underlying (ETH).
 TOKEN_PRICE_FALLBACK_SYMBOL = {
     "rethst": "ETH",
-    "wrapped wsteth": "ETH",
     "wstethst": "ETH",
-    "strato reth": "ETH",
-    "strato wsteth": "ETH",
+    "wsteth": "ETH",
+    "reth": "ETH",
 }
 
 
@@ -51,13 +49,13 @@ def get_external_symbol(token_symbol: str) -> str:
     Get the external price oracle symbol for a token.
     
     Args:
-        token_symbol: On-chain token symbol (e.g., "ETH", "BTC", "USDST")
+        token_symbol: On-chain token symbol (e.g., "ETHST", "GOLDST", "USDST")
         
     Returns:
-        External symbol for price lookup (e.g., "ETH", "BTC", "USDST")
+        External symbol for price lookup (e.g., "ETH", "GOLDST", "USDST")
     """
-    normalized = _normalize_symbol(token_name)
-    return TOKEN_TO_EXTERNAL_SYMBOL.get(normalized, token_name.strip())
+    normalized = _normalize_symbol(token_symbol)
+    return TOKEN_TO_EXTERNAL_SYMBOL.get(normalized, token_symbol.strip())
 
 
 class PriceOracle:
@@ -254,7 +252,7 @@ class PriceOracle:
                     logger.warning(
                         "Using fallback oracle symbol %s for %s",
                         fallback_a,
-                        token_a_name,
+                        token_a_symbol,
                     )
         if price_b is None:
             fallback_b = _get_fallback_symbol(symbol_b)
@@ -265,7 +263,7 @@ class PriceOracle:
                     logger.warning(
                         "Using fallback oracle symbol %s for %s",
                         fallback_b,
-                        token_b_name,
+                        token_b_symbol,
                     )
         
         if price_a is None:

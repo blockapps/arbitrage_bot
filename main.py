@@ -89,7 +89,7 @@ class ArbitrageBot:
             # Auto-register BlockApps tokens based on token names
             # These use the on-chain BlockApps PriceOracle instead of Alchemy
             for token in [pool.token_a, pool.token_b]:
-                external_symbol = get_external_symbol(token.name)
+                external_symbol = get_external_symbol(token.symbol)
                 if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
                     self.oracle.register_blockapps_token(external_symbol, token.address)
             
@@ -114,8 +114,8 @@ class ArbitrageBot:
         # Pre-fetch prices for all tokens in all pools
         all_token_symbols = set()
         for executor in self.executors:
-            all_token_symbols.add(get_external_symbol(executor.token_a.name))
-            all_token_symbols.add(get_external_symbol(executor.token_b.name))
+            all_token_symbols.add(get_external_symbol(executor.token_a.symbol))
+            all_token_symbols.add(get_external_symbol(executor.token_b.symbol))
         
         if all_token_symbols:
             self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)

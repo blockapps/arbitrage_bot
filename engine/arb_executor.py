@@ -92,7 +92,12 @@ class ArbitrageExecutor:
         try:
             # Refresh pool data and balances
             self.pool.fetch_pool_data(force_refresh=True)
-            reserve_a, reserve_b = self.pool.get_reserves()
+            is_stable_pool = self.pool.is_stable_pool()
+
+            if is_stable_pool:
+                reserve_a, reserve_b = self.pool.get_effective_reserves()
+            else:
+                reserve_a, reserve_b = self.pool.get_reserves()
             
             # Early validation: reject invalid inputs
             if reserve_a <= 0 or reserve_b <= 0:
@@ -123,9 +128,6 @@ class ArbitrageExecutor:
                 return None
             
             # Convert min_profit from USD to token_b amount
-            # min_profit_token_b = min_profit_usd / price_b_in_usd
-            # Since price_b is in USD (wei scale), we compute:
-            # min_profit_token_b = (min_profit_usd * WEI_SCALE) / price_b
             min_profit_token_b = (self.min_profit_usd * WEI_SCALE) // price_b
             
             # Validate balances
@@ -134,7 +136,6 @@ class ArbitrageExecutor:
                 return None
             
             reserve_ratio_price = (reserve_b * WEI_SCALE) // reserve_a
-            is_stable_pool = self.pool.is_stable_pool()
             pool_price = self.pool.get_stable_aligned_price() if is_stable_pool else reserve_ratio_price
             price_diff = oracle_price - pool_price
             price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
@@ -149,7 +150,6 @@ class ArbitrageExecutor:
                     pool_price / WEI_SCALE
                 )
             
-            # Use stable-aware sizing for stable pools and AMM closed-form sizing for AMM pools.
             common_kwargs = {
                 "reserve_x": reserve_a,
                 "reserve_y": reserve_b,
@@ -165,8 +165,6 @@ class ArbitrageExecutor:
             )
             if is_stable_pool:
                 stable_params = self.pool.get_stable_params()
-                stable_params["rate_a"] = price_a
-                stable_params["rate_b"] = price_b
                 common_kwargs["min_profit"] = min_profit_token_b // 10
                 reason, result = find_optimal_trade_stable_auto(
                     **common_kwargs,
