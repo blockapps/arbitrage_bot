@@ -17,6 +17,9 @@ oracle:
 liquidation:
   enabled: true
 
+# Health Check
+health_port: 8080
+
 # Execution Settings
 execution:
   execution_interval: 300 # seconds between scans

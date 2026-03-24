@@ -18,6 +18,7 @@ from market.oracle import PriceOracle, get_external_symbol
 from engine.arb_executor import ArbitrageExecutor
 from engine.liquidation_executor import LiquidationExecutor
 from engine.helpers import ensure_pool_approvals
+from core.health import start_health_server
 
 logging.basicConfig(
     level=logging.INFO,
@@ -192,6 +193,10 @@ def main():
     bot = ArbitrageBot(a.config)
     bot.dry_run = not a.live
     bot.init_components()
+
+    health_port = bot.cfg.get("health_port", 8080)
+    start_health_server(bot, port=health_port)
+
     bot.run()
 
 
