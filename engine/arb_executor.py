@@ -16,6 +16,7 @@ from onchain.pool import Pool
 from market.oracle import PriceOracle
 from core.math_utils import find_optimal_trade_auto
 from engine.helpers import check_gas_balance, check_sell_pnl, update_cumulative_profit
+from core.notifier import notify_error
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,7 @@ class ArbitrageExecutor:
                 )
             except ValueError as e:
                 logger.error(f"Failed to get oracle prices: {e}")
+                notify_error(f"Failed to get oracle prices: {e}")
                 return None
             
             # Calculate oracle price ratio: how many token_b equals one token_a in value
@@ -182,6 +184,7 @@ class ArbitrageExecutor:
             
         except Exception as e:
             logger.error(f"Error scanning for opportunities: {e}")
+            notify_error(f"Error scanning for opportunities: {e}")
             return None
     
     def execute_opportunity(self, opportunity: ArbitrageOpportunity) -> ExecutionResult:
@@ -237,6 +240,7 @@ class ArbitrageExecutor:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Arbitrage execution failed: {error_msg}")
+            notify_error(f"Arbitrage execution failed: {error_msg}")
             return ExecutionResult(
                 success=False,
                 opportunity=opportunity,
