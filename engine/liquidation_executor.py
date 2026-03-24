@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from onchain.cdp import CDP
 from engine.helpers import update_cumulative_profit
 from core.constants import WEI_SCALE
+from core.notifier import notify_error
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,7 @@ class LiquidationExecutor:
 
         except Exception as e:
             logger.error(f"Error scanning for liquidation opportunities: {e}")
+            notify_error(f"Error scanning for liquidation opportunities: {e}")
             return []
 
     def execute_liquidation(self, opp: LiquidationOpportunity) -> LiquidationResult:
@@ -132,6 +134,7 @@ class LiquidationExecutor:
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Liquidation failed: {error_msg}")
+            notify_error(f"Liquidation failed: {error_msg}")
             return LiquidationResult(
                 success=False,
                 opportunity=opp,

@@ -18,6 +18,8 @@ from market.oracle import PriceOracle, get_external_symbol
 from engine.arb_executor import ArbitrageExecutor
 from engine.liquidation_executor import LiquidationExecutor
 from engine.helpers import ensure_pool_approvals
+from core.health import start_health_server
+from core.notifier import notify_error
 
 logging.basicConfig(
     level=logging.INFO,
@@ -159,7 +161,9 @@ class ArbitrageBot:
                 if res.success:
                     log.info(f"liquidation succeeded for borrower={opp.borrower[:16]}…")
                 else:
-                    log.warning(f"liquidation failed for borrower={opp.borrower[:16]}…: {res.error_message}")
+                    msg = f"liquidation failed for borrower={opp.borrower[:16]}…: {res.error_message}"
+                    log.warning(msg)
+                    notify_error(msg)
 
         return any_executed
 
@@ -177,6 +181,7 @@ class ArbitrageBot:
                 self.running = False
             except Exception as e:
                 log.error(f"loop error: {e}")
+                notify_error(f"loop error: {e}")
                 print("\n\n\n")  # 3 newlines even on error
                 time.sleep(self.interval)
 
@@ -192,6 +197,10 @@ def main():
     bot = ArbitrageBot(a.config)
     bot.dry_run = not a.live
     bot.init_components()
+
+    health_port = bot.cfg.get("health_port", 8080)
+    start_health_server(bot, port=health_port)
+
     bot.run()
 
 
