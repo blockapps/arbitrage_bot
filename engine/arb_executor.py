@@ -14,7 +14,7 @@ from core.constants import WEI_SCALE
 from onchain.token import Token
 from onchain.pool import Pool
 from market.oracle import PriceOracle
-from core.math_utils import find_optimal_trade_auto
+from core.math_utils import find_optimal_trade_auto, find_optimal_trade_stable_auto
 from engine.helpers import check_gas_balance, check_sell_pnl, update_cumulative_profit
 
 logger = logging.getLogger(__name__)
@@ -133,24 +133,48 @@ class ArbitrageExecutor:
                 logger.warning(f"No arbitrage opportunity: No token balances")
                 return None
             
-            pool_price = (reserve_b * WEI_SCALE) // reserve_a
+            reserve_ratio_price = (reserve_b * WEI_SCALE) // reserve_a
+            is_stable_pool = self.pool.is_stable_pool()
+            pool_price = self.pool.get_stable_aligned_price() if is_stable_pool else reserve_ratio_price
             price_diff = oracle_price - pool_price
             price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
             
             logger.info(f"Pool price: {pool_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
             logger.info(f"Oracle price: {oracle_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
             logger.info(f"Price diff: {price_diff / WEI_SCALE:.6f} {self.token_b.symbol} ({price_diff_pct:.2f}%)")
+            if is_stable_pool:
+                logger.info(
+                    "Stable price trace: reserve-ratio=%.6f, stable-aligned-ratio=%.6f",
+                    reserve_ratio_price / WEI_SCALE,
+                    pool_price / WEI_SCALE
+                )
             
-            # Use auto-direction selection to find optimal trade (with gas-adjusted balances)
-            reason, result = find_optimal_trade_auto(
-                reserve_x=reserve_a,
-                reserve_y=reserve_b,
-                oracle_price_xy=oracle_price,
-                balance_x=check_gas_balance(self.token_a, self.token_a.balance),
-                balance_y=check_gas_balance(self.token_b, self.token_b.balance),
-                fee_bps=self.fee_bps,
-                min_profit=min_profit_token_b
+            # Use stable-aware sizing for stable pools and AMM closed-form sizing for AMM pools.
+            common_kwargs = {
+                "reserve_x": reserve_a,
+                "reserve_y": reserve_b,
+                "oracle_price_xy": oracle_price,
+                "balance_x": check_gas_balance(self.token_a, self.token_a.balance),
+                "balance_y": check_gas_balance(self.token_b, self.token_b.balance),
+                "fee_bps": self.fee_bps,
+                "min_profit": min_profit_token_b,
+            }
+            logger.info(
+                f"pricing path selected: {'stable' if is_stable_pool else 'amm'} "
+                f"(isStable={is_stable_pool}, source=on-chain BlockApps-Pool.isStable)"
             )
+            if is_stable_pool:
+                stable_params = self.pool.get_stable_params()
+                stable_params["rate_a"] = price_a
+                stable_params["rate_b"] = price_b
+                common_kwargs["min_profit"] = min_profit_token_b // 10
+                reason, result = find_optimal_trade_stable_auto(
+                    **common_kwargs,
+                    stable_params=stable_params,
+                    pool_price_xy_override=pool_price,
+                )
+            else:
+                reason, result = find_optimal_trade_auto(**common_kwargs)
             
             if result is None:
                 logger.info("No arbitrage opportunity found - {}".format(reason))

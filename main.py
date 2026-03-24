@@ -62,57 +62,64 @@ class ArbitrageBot:
                 blockapps_price_oracle=oracle_cfg.get("blockapps_price_oracle", "")
             )
 
-            trade_cfg = self.cfg["trading"]
-            min_profit = Decimal(str(trade_cfg["min_profit"]))
-            min_profit_wei = int(min_profit * WEI_SCALE)
-            
-            exec_cfg = self.cfg.get("execution", {})
-            self.vault_addr = exec_cfg.get("vault_addr", "")
+        trade_cfg = self.cfg["trading"]
+        min_profit = Decimal(str(trade_cfg["min_profit"]))
+        min_profit_wei = int(min_profit * WEI_SCALE)
+        slippage_factor_amm = float(trade_cfg.get("slippage_factor_amm", 0.96))
+        slippage_factor_stable = float(trade_cfg.get("slippage_factor_stable", 0.92))
+        
+        exec_cfg = self.cfg.get("execution", {})
+        self.vault_addr = exec_cfg.get("vault_addr", "")
 
-            # Initialize executor for each pool
-            for pool_config in pools:
-                pool_addr = pool_config.get("address")
-                
-                pool = Pool(pool_addr, fee_bps=fee_bps)
-                pool.fetch_pool_data()
-                
-                # Auto-register BlockApps tokens based on token names
-                # These use the on-chain BlockApps PriceOracle instead of Alchemy
-                for token in [pool.token_a, pool.token_b]:
-                    external_symbol = get_external_symbol(token.symbol)
-                    if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
-                        self.oracle.register_blockapps_token(external_symbol, token.address)
-                
-                executor = ArbitrageExecutor(
-                    token_a=pool.token_a,
-                    token_b=pool.token_b,
-                    pool=pool,
-                    oracle=self.oracle,
-                    fee_bps=fee_bps,
-                    min_profit_usd=min_profit_wei,
-                )
-                
-                # Ensure pool approvals
-                ensure_pool_approvals(pool.token_a, pool.token_b, pool, self.vault_addr)
-                
-                self.executors.append(executor)
-                log.info(f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr}")
-            
-            # Pre-fetch prices for all tokens in all pools
-            all_token_symbols = set()
-            for executor in self.executors:
-                all_token_symbols.add(get_external_symbol(executor.token_a.symbol))
-                all_token_symbols.add(get_external_symbol(executor.token_b.symbol))
-            
-            if all_token_symbols:
-                self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
+        # Initialize executor for each pool
+        for pool_config in pools:
+            pool_addr = pool_config.get("address")
+            pool_fee_bps = int(pool_config.get("fee_bps", fee_bps))
 
-        # Initialize liquidation executor if enabled
-        liq_cfg = self.cfg.get("liquidation", {})
-        if liq_cfg.get("enabled", False):
-            self.liquidation_executor = LiquidationExecutor()
-            log.info("CDP liquidation scanning enabled")
-
+            pool_slippage_amm = float(pool_config.get("slippage_factor_amm", slippage_factor_amm))
+            pool_slippage_stable = float(pool_config.get("slippage_factor_stable", slippage_factor_stable))
+            pool = Pool(
+                pool_addr,
+                fee_bps=pool_fee_bps,
+                slippage_factor_amm=pool_slippage_amm,
+                slippage_factor_stable=pool_slippage_stable,
+            )
+            pool.fetch_pool_data()
+            
+            # Auto-register BlockApps tokens based on token names
+            # These use the on-chain BlockApps PriceOracle instead of Alchemy
+            for token in [pool.token_a, pool.token_b]:
+                external_symbol = get_external_symbol(token.name)
+                if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
+                    self.oracle.register_blockapps_token(external_symbol, token.address)
+            
+            executor = ArbitrageExecutor(
+                token_a=pool.token_a,
+                token_b=pool.token_b,
+                pool=pool,
+                oracle=self.oracle,
+                fee_bps=pool_fee_bps,
+                min_profit_usd=min_profit_wei,
+            )
+            
+            # Ensure pool approvals
+            ensure_pool_approvals(pool.token_a, pool.token_b, pool, self.vault_addr)
+            
+            self.executors.append(executor)
+            log.info(
+                f"initialized {pool.token_a.symbol}-{pool.token_b.symbol} pool at {pool_addr} "
+                f"(isStable={pool.is_stable_pool()}, source=on-chain BlockApps-Pool.isStable)"
+            )
+        
+        # Pre-fetch prices for all tokens in all pools
+        all_token_symbols = set()
+        for executor in self.executors:
+            all_token_symbols.add(get_external_symbol(executor.token_a.name))
+            all_token_symbols.add(get_external_symbol(executor.token_b.name))
+        
+        if all_token_symbols:
+            self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
+        
         if self.dry_run:
             log.info("dry-run mode enabled")
 

@@ -6,6 +6,7 @@ import logging
 import requests
 import time
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Optional, Tuple
 
 from core.strato_client import strato_client
@@ -23,6 +24,15 @@ class PoolData:
     tokenB: 'Token'  # Reference to Token object
     tokenABalance: int  # Balance in wei (raw units)
     tokenBBalance: int  # Balance in wei (raw units)
+    aToBRatio: int  # Pool ratio tokenB per tokenA (wei scaled)
+    bToARatio: int  # Pool ratio tokenA per tokenB (wei scaled)
+    isStable: bool  # True for stable pools, False for AMM pools
+    stableFee: int = 0
+    offpegFeeMultiplier: int = 0
+    initialA: int = 0
+    futureA: int = 0
+    initialATime: int = 0
+    futureATime: int = 0
 
 
 
@@ -33,7 +43,9 @@ class Pool:
     def __init__(
         self,
         address: str,
-        fee_bps: int = 30
+        fee_bps: int = 30,
+        slippage_factor_amm: float = 0.96,
+        slippage_factor_stable: float = 0.92,
     ):
         """
         Initialize pool contract
@@ -41,9 +53,13 @@ class Pool:
         Args:
             address: Pool contract address
             fee_bps: Pool fee in basis points
+            slippage_factor_amm: Min-out multiplier for AMM swaps
+            slippage_factor_stable: Min-out multiplier for stable swaps
         """
         self.address = address
         self.fee_bps = fee_bps
+        self.slippage_factor_amm = self._normalize_slippage_factor(slippage_factor_amm)
+        self.slippage_factor_stable = self._normalize_slippage_factor(slippage_factor_stable)
         
         # Tokens will be initialized when fetch_pool_data() is called
         self.token_a: Optional[Token] = None
@@ -51,6 +67,63 @@ class Pool:
         
         # Cache pool data
         self._pool_data: Optional[PoolData] = None
+        self.is_stable: bool = False
+
+    @staticmethod
+    def _normalize_slippage_factor(value: float, default: float = 0.96) -> float:
+        try:
+            factor = float(value)
+        except (TypeError, ValueError):
+            return default
+        # Keep factor in sane bounds for minAmountOut guard.
+        if factor <= 0 or factor > 1:
+            return default
+        return factor
+
+    @staticmethod
+    def _to_int(value, default: int = 0) -> int:
+        if value is None:
+            return default
+        try:
+            return int(str(value))
+        except Exception:
+            try:
+                return int(float(value))
+            except Exception:
+                return default
+
+    @staticmethod
+    def _to_scaled_ratio(value, default: int = 0) -> int:
+        """
+        Parse pool ratio values to 1e18-scaled integer.
+        Handles both decimal strings (e.g. "0.9165") and already-scaled ints.
+        """
+        if value is None:
+            return default
+
+        text = str(value).strip()
+        if not text:
+            return default
+
+        # If ratio comes as decimal, scale it to wei.
+        if any(ch in text for ch in (".", "e", "E")):
+            try:
+                scaled = int(Decimal(text) * Decimal(WEI_SCALE))
+                return scaled if scaled > 0 else default
+            except (InvalidOperation, ValueError):
+                return default
+
+        # Integer path: value may already be wei-scaled or unscaled integer ratio.
+        try:
+            parsed = int(text)
+        except ValueError:
+            return default
+
+        if parsed <= 0:
+            return default
+
+        # Heuristic: small ints represent unscaled ratios (e.g. "1"), scale them.
+        return parsed * WEI_SCALE if parsed < 10**12 else parsed
     
     def fetch_pool_data(self, force_refresh: bool = False) -> PoolData:
         """
@@ -70,7 +143,7 @@ class Pool:
             # Build select query with nested balances and allowances for user
             # Use !left instead of !inner so we get token info even if no balances/allowances
             select_query = (
-                f'address,tokenABalance,tokenBBalance,'
+                f'address,tokenABalance,tokenBBalance,aToBRatio,bToARatio,isStable,'
                 f'tokenA:tokenA_fkey(address,_symbol,_name,'
                 f'balances:BlockApps-Token-_balances!left(key,value::text),'
                 f'allowances:BlockApps-Token-_allowances!left(key,key2,value::text)),'
@@ -140,12 +213,25 @@ class Pool:
             self.token_b.allowance = int(token_b_allowances[0].get('value', '0')) if token_b_allowances else 0
             
             # Create PoolData with references to token objects
+            is_stable_raw = pool_dict.get('isStable', False)
+            is_stable = str(is_stable_raw).lower() in ('true', '1', 't', 'yes')
+            self.is_stable = is_stable
+            stable_meta = self._fetch_stable_meta(client.strato_node_url, access_token) if is_stable else {}
             self._pool_data = PoolData(
                 address=pool_dict.get('address', self.address),
                 tokenA=self.token_a,
                 tokenB=self.token_b,
-                tokenABalance=int(pool_dict.get('tokenABalance', 0)),
-                tokenBBalance=int(float(pool_dict.get('tokenBBalance', 0)))  # Handle float conversion
+                tokenABalance=self._to_int(pool_dict.get('tokenABalance', 0)),
+                tokenBBalance=self._to_int(pool_dict.get('tokenBBalance', 0)),
+                aToBRatio=self._to_scaled_ratio(pool_dict.get('aToBRatio', 0)),
+                bToARatio=self._to_scaled_ratio(pool_dict.get('bToARatio', 0)),
+                isStable=self.is_stable,
+                stableFee=self._to_int(stable_meta.get('fee', 0)),
+                offpegFeeMultiplier=self._to_int(stable_meta.get('offpegFeeMultiplier', 0)),
+                initialA=self._to_int(stable_meta.get('initialA', 0)),
+                futureA=self._to_int(stable_meta.get('futureA', 0)),
+                initialATime=self._to_int(stable_meta.get('initialATime', 0)),
+                futureATime=self._to_int(stable_meta.get('futureATime', 0)),
             )
             
             return self._pool_data
@@ -153,6 +239,43 @@ class Pool:
         except Exception as e:
             logger.error(f"Failed to fetch pool data: {e}")
             raise
+
+    def _fetch_stable_meta(self, strato_node_url: str, access_token: str) -> dict:
+        """
+        Best-effort stable pool metadata lookup.
+        This must never break the base pool fetch flow.
+        """
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        params = {
+            'address': f'eq.{self.address}',
+            'select': 'fee,offpegFeeMultiplier,initialA,futureA,initialATime,futureATime'
+        }
+
+        # Cirrus table names can differ by deployment; try likely candidates.
+        for table in ("BlockApps-StablePool", "StablePool"):
+            try:
+                response = requests.get(
+                    f'{strato_node_url}/cirrus/search/{table}',
+                    headers=headers,
+                    params=params,
+                    timeout=10000
+                )
+                if not response.ok:
+                    continue
+                data = response.json()
+                if data and len(data) > 0:
+                    return data[0]
+            except Exception:
+                continue
+
+        logger.warning(
+            "Stable pool metadata not available in Cirrus for %s; using conservative defaults",
+            self.address
+        )
+        return {}
     
     def get_reserves(self) -> Tuple[int, int]:
         """
@@ -173,6 +296,41 @@ class Pool:
         except Exception as e:
             logger.error(f"Failed to get reserves: {e}")
             raise
+
+    def is_stable_pool(self) -> bool:
+        """
+        Return pool type flag discovered from on-chain pool state.
+        """
+        if self._pool_data is None:
+            self.fetch_pool_data()
+        return self.is_stable
+
+    def get_stable_params(self) -> dict:
+        """
+        Return stable-pool parameters needed for contract-aligned quote math.
+        """
+        if self._pool_data is None:
+            self.fetch_pool_data()
+        p = self._pool_data
+        if not p or not p.isStable:
+            return {}
+
+        now = int(time.time())
+        amp = p.futureA
+        if p.futureATime > 0 and now < p.futureATime and p.initialATime < p.futureATime:
+            if p.futureA > p.initialA:
+                amp = p.initialA + ((p.futureA - p.initialA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+            else:
+                amp = p.initialA - ((p.initialA - p.futureA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+        # Only provide params that were actually discovered.
+        params = {}
+        if amp > 0:
+            params["amp"] = int(amp)
+        if p.stableFee > 0:
+            params["fee"] = int(p.stableFee)
+        if p.offpegFeeMultiplier > 0:
+            params["offpeg_fee_multiplier"] = int(p.offpegFeeMultiplier)
+        return params
     
     def get_price(self) -> int:
         """
@@ -186,6 +344,16 @@ class Pool:
             return 0
         # Price in wei scale: (reserve_b * 10^18) // reserve_a
         return (reserve_b * WEI_SCALE) // reserve_a
+
+    def get_stable_aligned_price(self) -> int:
+        """
+        Preferred pool price for stable pools: use pool ratio fields when available.
+        Falls back to reserve ratio for AMM pools or missing ratio fields.
+        """
+        pool_data = self.fetch_pool_data()
+        if pool_data.isStable and pool_data.aToBRatio > 0:
+            return pool_data.aToBRatio
+        return self.get_price()
     
     def swap(
         self,
@@ -213,10 +381,12 @@ class Pool:
         deadline = int(time.time()) + 60
         
         # Build args matching contract signature
+        slippage_factor = self.slippage_factor_stable if self.is_stable else self.slippage_factor_amm
+        min_amount_out_guarded = int(min_amount_out * slippage_factor)
         args = {
             'isAToB': is_a_to_b,
             'amountIn': amount_in,
-            'minAmountOut': int(min_amount_out*0.96),
+            'minAmountOut': min_amount_out_guarded,
             'deadline': deadline
         }
         

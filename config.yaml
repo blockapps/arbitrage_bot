@@ -3,10 +3,21 @@ pools:
   - address: "0000000000000000000000000000000000001017" # ETHST-USDST pool
   - address: "000000000000000000000000000000000000101b" # GOLDST-USDST pool
   - address: "000000000000000000000000000000000000101d" # SILVST-USDST pool
+  - address: "cb85e12ca5d98de95715fc75ae251a66b662ea06" # GOLDST-SILVST pool
+  - address: "34d7caf576cf9493f054d9eced99dcd463eba4b7" # ETHST-BTCST pool
+  - address: "72f029994b1003447b4fcae5025ae78fcbec258e" # wstETHST-USDST pool
+  # Add new stable pools by POOL address only (not token addresses):
+  - address: "ff2befcd850183170627dcbc377c3fd573789172"  # XAUTST-GOLDST pool
+  - address: "bab35f9fe024e2735edae7a9c0aba4db260a649c"   # sUSDSST-USDST pool
+  - address: "5888fbe6d6774c1d5788a7b631fc2a2fe88c44c6"  # syrupUCDCST-USDST pool
+  - address: "41be20683ef9d57884e0a92f203e6c3161cf0aa1"  # rETH-wstETH pool
+
 # Trading Parameters
 trading:
   fee_bps: 30 # Pool fee in basis points (0.3%)
-  min_profit: 0.01 # $0.01 minimum profit
+  min_profit: 0.01 
+  slippage_factor_amm: 0.96 # 4% slippage tolerance for AMM pools
+  slippage_factor_stable: 0.92 # 8% slippage tolerance for stable pools
 
 # Oracle Configuration
 oracle:
