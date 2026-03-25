@@ -14,16 +14,5 @@ BPS_DENOM = 10_000
 # USDST token address
 USDST_ADDRESS = "937efa7e3a77e20bbdbd7c0d32b6514f368c1010"
 
-# Tokens that use BlockApps on-chain price oracle instead of Alchemy.
-# This includes synthetic/stable assets that are typically unavailable on Alchemy symbol feeds.
-BLOCKAPPS_ORACLE_TOKENS = {
-    "GOLDST",
-    "SILVST",
-    "Wrapped wstETH",
-    "SUSDST",
-    "USDSST",
-    "XAUTST",
-    "rETHST",
-    "STRATO rETH",
-    "STRATO wstETH",
-}
+# Tokens that use BlockApps on-chain price oracle instead of Alchemy
+BLOCKAPPS_ORACLE_TOKENS = {"GOLDST", "SILVST", "rETH", "wstETH", "syrupUSDC", "sUSDS"}
