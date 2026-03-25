@@ -19,7 +19,7 @@ USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
 # Token symbol to external price symbol mapping
 # Maps on-chain token symbols to external oracle symbols when they differ
 TOKEN_TO_EXTERNAL_SYMBOL = {
-    "WBTC": "BTC",
+    "wbtc": "BTC",
 }
 
 def _normalize_symbol(value: str) -> str:
