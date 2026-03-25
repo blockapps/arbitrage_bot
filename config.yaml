@@ -1,12 +1,16 @@
 # Contract Addresses
 pools:
-  - address: "0000000000000000000000000000000000001017" # ETHST-USDST pool
+  - address: "0000000000000000000000000000000000001017" # ETH-USDST pool
   - address: "000000000000000000000000000000000000101b" # GOLDST-USDST pool
   - address: "000000000000000000000000000000000000101d" # SILVST-USDST pool
+  - address: "bab35f9fe024e2735edae7a9c0aba4db260a649c" # sUSDS-USDST pool
+  - address: "5888fbe6d6774c1d5788a7b631fc2a2fe88c44c6" # syrupUSDC-USDST pool
 # Trading Parameters
 trading:
   fee_bps: 30 # Pool fee in basis points (0.3%)
-  min_profit: 0.01 # $0.01 minimum profit
+  min_profit: 0.01 
+  slippage_factor_amm: 0.96 # 4% slippage tolerance for AMM pools
+  slippage_factor_stable: 0.92 # 8% slippage tolerance for stable pools
 
 # Oracle Configuration
 oracle:

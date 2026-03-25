@@ -19,8 +19,11 @@ USDST_PRICE_WEI = WEI_SCALE  # 1.0 * 10^18
 # Token symbol to external price symbol mapping
 # Maps on-chain token symbols to external oracle symbols when they differ
 TOKEN_TO_EXTERNAL_SYMBOL = {
-    "WBTC": "BTC",
+    "wbtc": "BTC",
 }
+
+def _normalize_symbol(value: str) -> str:
+    return str(value).strip().lower()
 
 
 def get_external_symbol(token_symbol: str) -> str:
@@ -28,12 +31,13 @@ def get_external_symbol(token_symbol: str) -> str:
     Get the external price oracle symbol for a token.
     
     Args:
-        token_symbol: On-chain token symbol (e.g., "ETH", "BTC", "USDST")
+        token_symbol: On-chain token symbol (e.g., "ETHST", "GOLDST", "USDST")
         
     Returns:
-        External symbol for price lookup (e.g., "ETH", "BTC", "USDST")
+        External symbol for price lookup (e.g., "ETH", "GOLDST", "USDST")
     """
-    return TOKEN_TO_EXTERNAL_SYMBOL.get(token_symbol, token_symbol)
+    normalized = _normalize_symbol(token_symbol)
+    return TOKEN_TO_EXTERNAL_SYMBOL.get(normalized, token_symbol.strip())
 
 
 class PriceOracle:
