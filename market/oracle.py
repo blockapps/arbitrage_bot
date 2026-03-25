@@ -26,22 +26,8 @@ TOKEN_TO_EXTERNAL_SYMBOL = {
     "reth": "STRATO rETH",
 }
 
-# Fallback symbol mapping when a direct price feed is unavailable.
-# LST-style assets fall back to their underlying (ETH).
-TOKEN_PRICE_FALLBACK_SYMBOL = {
-    "rethst": "ETH",
-    "wstethst": "ETH",
-    "wsteth": "ETH",
-    "reth": "ETH",
-}
-
-
 def _normalize_symbol(value: str) -> str:
     return str(value).strip().lower()
-
-
-def _get_fallback_symbol(symbol: str) -> str | None:
-    return TOKEN_PRICE_FALLBACK_SYMBOL.get(_normalize_symbol(symbol))
 
 
 def get_external_symbol(token_symbol: str) -> str:
@@ -241,30 +227,6 @@ class PriceOracle:
         
         price_a = prices.get(symbol_a)
         price_b = prices.get(symbol_b)
-        
-        # Fallback for assets with sparse direct symbol coverage in external APIs.
-        if price_a is None:
-            fallback_a = _get_fallback_symbol(symbol_a)
-            if fallback_a:
-                fallback_prices = self.fetch_all_prices([fallback_a], force_refresh=force_refresh)
-                if fallback_a in fallback_prices:
-                    price_a = fallback_prices[fallback_a]
-                    logger.warning(
-                        "Using fallback oracle symbol %s for %s",
-                        fallback_a,
-                        token_a_symbol,
-                    )
-        if price_b is None:
-            fallback_b = _get_fallback_symbol(symbol_b)
-            if fallback_b:
-                fallback_prices = self.fetch_all_prices([fallback_b], force_refresh=force_refresh)
-                if fallback_b in fallback_prices:
-                    price_b = fallback_prices[fallback_b]
-                    logger.warning(
-                        "Using fallback oracle symbol %s for %s",
-                        fallback_b,
-                        token_b_symbol,
-                    )
         
         if price_a is None:
             raise ValueError(f"Failed to get price for {token_a_symbol} (external: {symbol_a})")
