@@ -119,7 +119,13 @@ class ArbitrageBot:
         
         if all_token_symbols:
             self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)
-        
+
+        # Initialize liquidation executor if enabled
+        liq_cfg = self.cfg.get("liquidation", {})
+        if liq_cfg.get("enabled", False):
+            self.liquidation_executor = LiquidationExecutor()
+            log.info("CDP liquidation scanning enabled")
+
         if self.dry_run:
             log.info("dry-run mode enabled")
 
