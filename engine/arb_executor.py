@@ -14,7 +14,7 @@ from core.constants import WEI_SCALE
 from onchain.token import Token
 from onchain.pool import Pool
 from market.oracle import PriceOracle
-from core.math_utils import find_optimal_trade_auto, find_optimal_trade_stable_auto
+from core.math_utils import find_optimal_trade_auto, find_optimal_trade_stable_n
 from engine.helpers import check_gas_balance, check_sell_pnl, update_cumulative_profit
 from core.notifier import notify_error
 
@@ -27,6 +27,8 @@ class ArbitrageOpportunity:
     optimal_input: int  # Optimal trade size in wei (input amount)
     expected_output: int  # Expected output amount in wei
     estimated_profit: int  # Estimated profit after fees in token B wei
+    coin_in_idx: int = -1  # Index of input coin (-1 = use direction-based logic)
+    coin_out_idx: int = -1  # Index of output coin (-1 = use direction-based logic)
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for logging/serialization"""
@@ -34,7 +36,9 @@ class ArbitrageOpportunity:
             'direction': self.direction,
             'optimal_input': self.optimal_input,
             'expected_output': self.expected_output,
-            'estimated_profit': self.estimated_profit
+            'estimated_profit': self.estimated_profit,
+            'coin_in_idx': self.coin_in_idx,
+            'coin_out_idx': self.coin_out_idx,
         }
 
 @dataclass
@@ -91,123 +95,185 @@ class ArbitrageExecutor:
     def scan_for_opportunity(self) -> Optional[ArbitrageOpportunity]:
         """Scan for arbitrage opportunities"""
         try:
-            # Refresh pool data and balances
             self.pool.fetch_pool_data(force_refresh=True)
             is_stable_pool = self.pool.is_stable_pool()
 
-            if is_stable_pool:
-                reserve_a, reserve_b = self.pool.get_effective_reserves()
-            else:
-                reserve_a, reserve_b = self.pool.get_reserves()
-            
-            # Early validation: reject invalid inputs
-            if reserve_a <= 0 or reserve_b <= 0:
-                logger.warning(f"No arbitrage opportunity: Invalid reserves (a={reserve_a}, b={reserve_b})")
-                return None
-            
-            # Fetch prices for BOTH tokens in the pool
-            try:
-                price_a, price_b = self.oracle.fetch_token_prices(
-                    self.token_a.symbol,
-                    self.token_b.symbol,
-                    force_refresh=True
-                )
-            except ValueError as e:
-                logger.error(f"Failed to get oracle prices: {e}")
-                notify_error(f"Failed to get oracle prices: {e}")
-                return None
-            
-            # Calculate oracle price ratio: how many token_b equals one token_a in value
-            # oracle_price = price_a / price_b (scaled by WEI_SCALE)
-            if price_b <= 0:
-                logger.warning(f"No arbitrage opportunity: Invalid oracle price_b ({price_b})")
-                return None
-            
-            oracle_price = (price_a * WEI_SCALE) // price_b
-            
-            if oracle_price <= 0:
-                logger.warning(f"No arbitrage opportunity: Invalid oracle price ratio ({oracle_price})")
-                return None
-            
-            # Convert min_profit from USD to token_b amount
-            min_profit_token_b = (self.min_profit_usd * WEI_SCALE) // price_b
-            
-            # Validate balances
-            if self.token_a.balance <= 0 and self.token_b.balance <= 0:
-                logger.warning(f"No arbitrage opportunity: No token balances")
-                return None
-            
-            reserve_ratio_price = (reserve_b * WEI_SCALE) // reserve_a
-            pool_price = self.pool.get_stable_aligned_price() if is_stable_pool else reserve_ratio_price
-            price_diff = oracle_price - pool_price
-            price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
-            
-            logger.info(f"Pool price: {pool_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
-            logger.info(f"Oracle price: {oracle_price / WEI_SCALE:.6f} {self.token_b.symbol} per {self.token_a.symbol}")
-            logger.info(f"Price diff: {price_diff / WEI_SCALE:.6f} {self.token_b.symbol} ({price_diff_pct:.2f}%)")
-            if is_stable_pool:
-                logger.info(
-                    "Stable price trace: reserve-ratio=%.6f, stable-aligned-ratio=%.6f",
-                    reserve_ratio_price / WEI_SCALE,
-                    pool_price / WEI_SCALE
-                )
-            
-            common_kwargs = {
-                "reserve_x": reserve_a,
-                "reserve_y": reserve_b,
-                "oracle_price_xy": oracle_price,
-                "balance_x": check_gas_balance(self.token_a, self.token_a.balance),
-                "balance_y": check_gas_balance(self.token_b, self.token_b.balance),
-                "fee_bps": self.fee_bps,
-                "min_profit": min_profit_token_b,
-            }
             logger.info(
-                f"pricing path selected: {'stable' if is_stable_pool else 'amm'} "
-                f"(isStable={is_stable_pool}, source=on-chain BlockApps-Pool.isStable)"
+                "pricing path selected: %s (isStable=%s, n_coins=%d)",
+                'stable' if is_stable_pool else 'amm',
+                is_stable_pool,
+                self.pool.n_coins(),
             )
+
             if is_stable_pool:
-                stable_params = self.pool.get_stable_params()
-                common_kwargs["min_profit"] = min_profit_token_b // 10
-                reason, result = find_optimal_trade_stable_auto(
-                    **common_kwargs,
-                    stable_params=stable_params,
-                    pool_price_xy_override=pool_price,
-                )
-            else:
-                reason, result = find_optimal_trade_auto(**common_kwargs)
-            
-            if result is None:
-                logger.info("No arbitrage opportunity found - {}".format(reason))
-                return None
-            
-            side, amount_in, expected_out, profit = result
-            
-            # Map side to direction
-            # "X->Y" = token_a -> token_b = "sell" token_a
-            # "Y->X" = token_b -> token_a = "buy" token_a
-            direction = "sell" if side == "X->Y" else "buy"
-            token_in_symbol = self.token_a.symbol if side == "X->Y" else self.token_b.symbol
-            token_out_symbol = self.token_b.symbol if side == "X->Y" else self.token_a.symbol
-            
-            logger.info(f"{direction.capitalize()} opportunity found ({side}):")
-            logger.info(f"  Input: {amount_in / WEI_SCALE:.6f} {token_in_symbol} ({amount_in} wei)")
-            logger.info(f"  Output: {expected_out / WEI_SCALE:.6f} {token_out_symbol} ({expected_out} wei)")
-            logger.info(f"  Profit: {profit / WEI_SCALE:.6f} {self.token_b.symbol} ({profit} wei)")
-            
-            opportunity = ArbitrageOpportunity(
-                direction=direction,
-                optimal_input=amount_in,
-                expected_output=expected_out,
-                estimated_profit=profit
-            )
-            
-            
-            return opportunity
-            
+                return self._scan_stable()
+            return self._scan_amm()
+
         except Exception as e:
             logger.error(f"Error scanning for opportunities: {e}")
-            notify_error(f"Error scanning for opportunities: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # AMM (constant-product) scan
+    # ------------------------------------------------------------------
+    def _scan_amm(self) -> Optional[ArbitrageOpportunity]:
+        reserve_a, reserve_b = self.pool.get_reserves()
+        if reserve_a <= 0 or reserve_b <= 0:
+            logger.warning("No arbitrage opportunity: Invalid reserves (a=%s, b=%s)", reserve_a, reserve_b)
+            return None
+
+        try:
+            price_a, price_b = self.oracle.fetch_token_prices(
+                self.token_a.symbol, self.token_b.symbol, force_refresh=True
+            )
+        except ValueError as e:
+            logger.error("Failed to get oracle prices: %s", e)
+            return None
+
+        if price_b <= 0:
+            logger.warning("No arbitrage opportunity: Invalid oracle price_b (%s)", price_b)
+            return None
+
+        oracle_price = (price_a * WEI_SCALE) // price_b
+        if oracle_price <= 0:
+            logger.warning("No arbitrage opportunity: Invalid oracle price ratio (%s)", oracle_price)
+            return None
+
+        min_profit_token_b = (self.min_profit_usd * WEI_SCALE) // price_b
+        if self.token_a.balance <= 0 and self.token_b.balance <= 0:
+            logger.warning("No arbitrage opportunity: No token balances")
+            return None
+
+        pool_price = (reserve_b * WEI_SCALE) // reserve_a
+        price_diff = oracle_price - pool_price
+        price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
+
+        logger.info("Pool price: %.6f %s per %s", pool_price / WEI_SCALE, self.token_b.symbol, self.token_a.symbol)
+        logger.info("Oracle price: %.6f %s per %s", oracle_price / WEI_SCALE, self.token_b.symbol, self.token_a.symbol)
+        logger.info("Price diff: %.6f %s (%.2f%%)", price_diff / WEI_SCALE, self.token_b.symbol, price_diff_pct)
+
+        reason, result = find_optimal_trade_auto(
+            reserve_x=reserve_a, reserve_y=reserve_b,
+            oracle_price_xy=oracle_price,
+            balance_x=check_gas_balance(self.token_a, self.token_a.balance),
+            balance_y=check_gas_balance(self.token_b, self.token_b.balance),
+            fee_bps=self.fee_bps,
+            min_profit=min_profit_token_b,
+        )
+
+        if result is None:
+            logger.info("No arbitrage opportunity found - %s", reason)
+            return None
+
+        side, amount_in, expected_out, profit = result
+        direction = "sell" if side == "X->Y" else "buy"
+        token_in_symbol = self.token_a.symbol if side == "X->Y" else self.token_b.symbol
+        token_out_symbol = self.token_b.symbol if side == "X->Y" else self.token_a.symbol
+
+        logger.info("%s opportunity found (%s):", direction.capitalize(), side)
+        logger.info("  Input: %.6f %s (%d wei)", amount_in / WEI_SCALE, token_in_symbol, amount_in)
+        logger.info("  Output: %.6f %s (%d wei)", expected_out / WEI_SCALE, token_out_symbol, expected_out)
+        logger.info("  Profit: %.6f %s (%d wei)", profit / WEI_SCALE, self.token_b.symbol, profit)
+
+        return ArbitrageOpportunity(
+            direction=direction,
+            optimal_input=amount_in,
+            expected_output=expected_out,
+            estimated_profit=profit,
+        )
+
+    # ------------------------------------------------------------------
+    # Stable-pool scan — n-coin generalised path
+    # ------------------------------------------------------------------
+    def _scan_stable(self) -> Optional[ArbitrageOpportunity]:
+        from market.oracle import get_external_symbol
+
+        coins = self.pool.coins
+        n = len(coins)
+
+        reserves = self.pool.get_effective_reserves_n()
+        if any(r <= 0 for r in reserves):
+            logger.warning("No arbitrage opportunity: Invalid reserves %s", reserves)
+            return None
+
+        symbols = [get_external_symbol(c.symbol) for c in coins]
+        try:
+            price_map = self.oracle.fetch_all_prices(symbols, force_refresh=True)
+        except Exception as e:
+            logger.error("Failed to get oracle prices: %s", e)
+            return None
+
+        oracle_prices = []
+        for sym in symbols:
+            p = price_map.get(sym)
+            if not p or p <= 0:
+                logger.warning("No oracle price for %s", sym)
+                return None
+            oracle_prices.append(p)
+
+        balances = [check_gas_balance(c, c.balance) for c in coins]
+        if all(b <= 0 for b in balances):
+            logger.warning("No arbitrage opportunity: No token balances")
+            return None
+
+        stable_params = self.pool.get_stable_params()
+        from core.math_utils import STABLE_A_PRECISION, STABLE_FEE_DENOMINATOR
+        amp = stable_params.get("amp", 100 * STABLE_A_PRECISION)
+        fee = stable_params.get("fee", self.fee_bps * 1_000_000)
+        offpeg = stable_params.get("offpeg_fee_multiplier", STABLE_FEE_DENOMINATOR)
+        rates = stable_params.get("rates", [WEI_SCALE] * n)
+        while len(rates) < n:
+            rates.append(WEI_SCALE)
+
+        min_profit_usd = self.min_profit_usd // 10
+
+        if n == 2:
+            pool_price = self.pool.get_stable_aligned_price()
+            oracle_price_ab = (oracle_prices[0] * WEI_SCALE) // oracle_prices[1]
+            price_diff = oracle_price_ab - pool_price
+            price_diff_pct = (price_diff * 10000 // pool_price) / 100 if pool_price > 0 else 0
+            reserve_ratio_price = (reserves[1] * WEI_SCALE) // reserves[0] if reserves[0] > 0 else 0
+            logger.info("Pool price: %.6f %s per %s", pool_price / WEI_SCALE, coins[1].symbol, coins[0].symbol)
+            logger.info("Oracle price: %.6f %s per %s", oracle_price_ab / WEI_SCALE, coins[1].symbol, coins[0].symbol)
+            logger.info("Price diff: %.6f %s (%.2f%%)", price_diff / WEI_SCALE, coins[1].symbol, price_diff_pct)
+            logger.info(
+                "Stable price trace: reserve-ratio=%.6f, stable-aligned-ratio=%.6f",
+                reserve_ratio_price / WEI_SCALE,
+                pool_price / WEI_SCALE,
+            )
+        else:
+            logger.info("Stable pool with %d coins: %s", n, [c.symbol for c in coins])
+
+        reason, result = find_optimal_trade_stable_n(
+            reserves=reserves, rates=rates,
+            oracle_prices=oracle_prices, balances=balances,
+            amp=amp, fee=fee, offpeg_fee_multiplier=offpeg,
+            min_profit_usd=min_profit_usd,
+        )
+
+        if result is None:
+            logger.info("No arbitrage opportunity found - %s", reason)
+            return None
+
+        i, j, amount_in, expected_out, profit_j = result
+        token_in = coins[i]
+        token_out = coins[j]
+        direction = f"{token_in.symbol}->{token_out.symbol}"
+
+        logger.info("Opportunity found (%s, coin %d->%d):", direction, i, j)
+        logger.info("  Input: %.6f %s (%d wei)", amount_in / WEI_SCALE, token_in.symbol, amount_in)
+        logger.info("  Output: %.6f %s (%d wei)", expected_out / WEI_SCALE, token_out.symbol, expected_out)
+        profit_usd = (profit_j * oracle_prices[j]) // WEI_SCALE
+        logger.info("  Profit: %.6f %s (~$%.4f)", profit_j / WEI_SCALE, token_out.symbol, profit_usd / WEI_SCALE)
+
+        return ArbitrageOpportunity(
+            direction=direction,
+            optimal_input=amount_in,
+            expected_output=expected_out,
+            estimated_profit=profit_j,
+            coin_in_idx=i,
+            coin_out_idx=j,
+        )
     
     def execute_opportunity(self, opportunity: ArbitrageOpportunity) -> ExecutionResult:
         """Execute an arbitrage opportunity"""
@@ -228,29 +294,65 @@ class ArbitrageExecutor:
         
         try:
             client = strato_client()
-            token_in = self.token_b if opportunity.direction == "buy" else self.token_a
             amount_in = opportunity.optimal_input
             expected_out = opportunity.expected_output
             
-            # Execute swap
-            swap_hash = self.pool.swap(
-                amount_in=amount_in,
-                token_in=token_in,
-                min_amount_out=expected_out
+            # Use index-based exchange for stable pools with explicit coin indices
+            use_exchange = (
+                self.pool.is_stable
+                and opportunity.coin_in_idx >= 0
+                and opportunity.coin_out_idx >= 0
             )
+
+            logger.info(
+                "execute_opportunity path use_exchange=%s pool.is_stable=%s scan_is_stable=%s "
+                "coin_in_idx=%s coin_out_idx=%s direction=%s amount_in=%s expected_out(min basis)=%s",
+                use_exchange,
+                self.pool.is_stable,
+                self.pool.is_stable_pool(),
+                opportunity.coin_in_idx,
+                opportunity.coin_out_idx,
+                opportunity.direction,
+                amount_in,
+                expected_out,
+            )
+
+            if use_exchange:
+                swap_hash = self.pool.exchange_stable(
+                    i=opportunity.coin_in_idx,
+                    j=opportunity.coin_out_idx,
+                    amount_in=amount_in,
+                    min_amount_out=expected_out,
+                )
+            else:
+                token_in = self.token_b if opportunity.direction == "buy" else self.token_a
+                swap_hash = self.pool.swap(
+                    amount_in=amount_in,
+                    token_in=token_in,
+                    min_amount_out=expected_out,
+                )
             
             transactions.append({'type': 'swap', 'hash': swap_hash, 'timestamp': time.time()})
             client.wait_for_transaction(swap_hash)
             
-            # Fetch fresh price_b from oracle for USD conversion
-            _, price_b = self.oracle.fetch_token_prices(
-                self.token_a.symbol,
-                self.token_b.symbol,
-                force_refresh=True
-            )
+            # Fetch fresh output-token price from oracle for USD conversion
+            if opportunity.coin_out_idx >= 0 and opportunity.coin_out_idx < len(self.pool.coins):
+                from market.oracle import get_external_symbol
+                out_sym = get_external_symbol(self.pool.coins[opportunity.coin_out_idx].symbol)
+                price_map = self.oracle.fetch_all_prices([out_sym], force_refresh=True)
+                price_out = price_map.get(out_sym)
+                if not price_out or price_out <= 0:
+                    logger.warning("Could not fetch output token price for profit tracking (symbol=%s)", out_sym)
+                    price_out = 0
+            else:
+                _, price_out = self.oracle.fetch_token_prices(
+                    self.token_a.symbol,
+                    self.token_b.symbol,
+                    force_refresh=True
+                )
             
-            # Update cumulative profit after successful swap (convert to USD)
-            update_cumulative_profit(opportunity.estimated_profit, price_b)
+            if price_out > 0:
+                update_cumulative_profit(opportunity.estimated_profit, price_out)
             
             return ExecutionResult(
                 success=True,
@@ -261,8 +363,20 @@ class ArbitrageExecutor:
             
         except Exception as e:
             error_msg = str(e)
-            logger.error(f"Arbitrage execution failed: {error_msg}")
-            notify_error(f"Arbitrage execution failed: {error_msg}")
+            logger.error("Arbitrage execution failed: %s", error_msg)
+            logger.error(
+                "execution context at failure: amount_in=%s expected_output(used as min basis)=%s "
+                "use_exchange=%s pool.is_stable=%s coin_in=%s coin_out=%s direction=%s",
+                opportunity.optimal_input,
+                opportunity.expected_output,
+                self.pool.is_stable
+                and opportunity.coin_in_idx >= 0
+                and opportunity.coin_out_idx >= 0,
+                self.pool.is_stable,
+                opportunity.coin_in_idx,
+                opportunity.coin_out_idx,
+                opportunity.direction,
+            )
             return ExecutionResult(
                 success=False,
                 opportunity=opportunity,

@@ -5,9 +5,9 @@ AMM Pool contract wrapper for Strato
 import logging
 import requests
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 from core.strato_client import strato_client
 from core.constants import WEI_SCALE, USDST_ADDRESS
@@ -39,6 +39,12 @@ class PoolData:
     adminBalanceB: int = 0
     rateOraclePriceA: int = 0
     rateOraclePriceB: int = 0
+    # N-coin fields (populated for stable pools)
+    coin_addresses: List[str] = field(default_factory=list)
+    coin_reserves: List[int] = field(default_factory=list)
+    coin_admin_balances: List[int] = field(default_factory=list)
+    coin_rate_multipliers: List[int] = field(default_factory=list)
+    coin_oracle_prices: List[int] = field(default_factory=list)
 
 
 
@@ -70,10 +76,12 @@ class Pool:
         # Tokens will be initialized when fetch_pool_data() is called
         self.token_a: Optional[Token] = None
         self.token_b: Optional[Token] = None
+        self.coins: List[Token] = []
         
         # Cache pool data
         self._pool_data: Optional[PoolData] = None
         self.is_stable: bool = False
+        self._stable_table: Optional[str] = None
 
     @staticmethod
     def _normalize_slippage_factor(value: float, default: float = 0.96) -> float:
@@ -217,10 +225,22 @@ class Pool:
             token_b_allowances = token_b_dict.get('allowances', [])
             self.token_b.balance = int(token_b_balances[0].get('value', '0')) if token_b_balances else 0
             self.token_b.allowance = int(token_b_allowances[0].get('value', '0')) if token_b_allowances else 0
+
+            self.coins = [self.token_a, self.token_b]
             
             # Create PoolData with references to token objects
             is_stable_raw = pool_dict.get('isStable', False)
             is_stable = str(is_stable_raw).lower() in ('true', '1', 't', 'yes')
+            # Cirrus returns isStable=False for this pool despite it being a StablePool contract.
+            _FORCE_STABLE_POOLS = {
+                '902651e10ab7d64fa7d0480657ac36676d155f2e',
+            }
+            if self.address.lower() in _FORCE_STABLE_POOLS and not is_stable:
+                logger.warning(
+                    "fetch_pool_data: overriding isStable=False -> True for known stable pool %s",
+                    self.address,
+                )
+                is_stable = True
             self.is_stable = is_stable
             token_a_addr = token_a_dict.get('address', '')
             token_b_addr = token_b_dict.get('address', '')
@@ -248,7 +268,25 @@ class Pool:
                 adminBalanceB=self._to_int(stable_meta.get('adminBalanceB', 0)),
                 rateOraclePriceA=self._to_int(stable_meta.get('rateOraclePriceA', 0)),
                 rateOraclePriceB=self._to_int(stable_meta.get('rateOraclePriceB', 0)),
+                coin_addresses=stable_meta.get('coin_addresses', []),
+                coin_reserves=stable_meta.get('coin_reserves', []),
+                coin_admin_balances=stable_meta.get('coin_admin_balances', []),
+                coin_rate_multipliers=stable_meta.get('coin_rate_multipliers', []),
+                coin_oracle_prices=stable_meta.get('coin_oracle_prices', []),
             )
+
+            # Append extra coins for n>2 stable pools
+            if is_stable and self._pool_data.coin_addresses:
+                extra_addrs = self._pool_data.coin_addresses[2:]
+                for addr in extra_addrs:
+                    existing = next((t for t in self.coins if t.address.lower() == addr.lower()), None)
+                    if existing is None:
+                        tok = Token(addr)
+                        self._populate_extra_coin(
+                            tok, addr, client.strato_node_url, access_token,
+                            client.account.address
+                        )
+                        self.coins.append(tok)
             
             return self._pool_data
             
@@ -263,6 +301,7 @@ class Pool:
         """
         Best-effort stable pool metadata lookup including mapping tables
         for rateMultipliers, adminBalances, and rateOracles.
+        Discovers all coins from the contract's coins array for n-coin support.
         """
         headers = {
             'Authorization': f'Bearer {access_token}',
@@ -301,41 +340,105 @@ class Pool:
             )
             return result
 
-        if token_a_addr and token_b_addr:
-            self._fetch_stable_mappings(
-                strato_node_url, headers, resolved_table,
-                token_a_addr, token_b_addr, result
+        self._stable_table = resolved_table
+
+        # Discover all coins from the contract's coins array
+        coin_addresses = self._fetch_coin_addresses(strato_node_url, headers, resolved_table)
+        if not coin_addresses and token_a_addr and token_b_addr:
+            coin_addresses = [token_a_addr, token_b_addr]
+        result['coin_addresses'] = coin_addresses
+
+        if coin_addresses:
+            self._fetch_stable_mappings_n(
+                strato_node_url, headers, resolved_table, coin_addresses, result
             )
+            # Populate legacy A/B fields from the n-coin arrays for backward compat
+            for idx, suffix in enumerate(['A', 'B']):
+                if idx < len(result.get('coin_rate_multipliers', [])):
+                    result[f'rateMultiplier{suffix}'] = result['coin_rate_multipliers'][idx]
+                if idx < len(result.get('coin_admin_balances', [])):
+                    result[f'adminBalance{suffix}'] = result['coin_admin_balances'][idx]
+                if idx < len(result.get('coin_oracle_prices', [])):
+                    result[f'rateOraclePrice{suffix}'] = result['coin_oracle_prices'][idx]
 
         return result
 
-    def _fetch_stable_mappings(
+    def _fetch_coin_addresses(
+        self, strato_node_url: str, headers: dict, table_prefix: str
+    ) -> List[str]:
+        """Fetch the ordered list of coin addresses from the StablePool coins array."""
+        url = f'{strato_node_url}/cirrus/search/{table_prefix}-coins'
+        params = {
+            'address': f'eq.{self.address}',
+            'select': 'key,value',
+            'order': 'key.asc',
+        }
+        try:
+            response = requests.get(url, headers=headers, params=params, timeout=10000)
+            if response.ok:
+                data = response.json()
+                if data:
+                    return [row['value'] for row in sorted(data, key=lambda r: int(r.get('key', 0)))]
+        except Exception as e:
+            logger.debug("Failed to fetch coins array from %s: %s", url, e)
+        return []
+
+    def _fetch_token_balance(
+        self, strato_node_url: str, headers: dict, table_prefix: str, token_addr: str
+    ) -> int:
+        """Fetch a token's pool-side balance from the tokenBalances mapping."""
+        val = self._fetch_mapping_value(
+            strato_node_url, headers, table_prefix, 'tokenBalances', token_addr
+        )
+        return self._to_int(val) if val is not None else 0
+
+    def _fetch_stable_mappings_n(
         self, strato_node_url: str, headers: dict, table_prefix: str,
-        token_a_addr: str, token_b_addr: str, result: dict
+        coin_addresses: List[str], result: dict
     ) -> None:
-        """Fetch rateMultipliers, adminBalances, and rateOracles from mapping sub-tables."""
-        for token_addr, suffix in [(token_a_addr, 'A'), (token_b_addr, 'B')]:
+        """Fetch rateMultipliers, adminBalances, rateOracles, and tokenBalances for all coins."""
+        n = len(coin_addresses)
+        rate_multipliers: List[int] = []
+        admin_balances: List[int] = []
+        oracle_prices: List[int] = []
+        reserves: List[int] = []
+
+        for idx, token_addr in enumerate(coin_addresses):
             val = self._fetch_mapping_value(
                 strato_node_url, headers, table_prefix, 'rateMultipliers', token_addr
             )
-            if val is not None:
-                result[f'rateMultiplier{suffix}'] = val
+            rate_multipliers.append(self._to_int(val) if val is not None else 0)
 
             val = self._fetch_mapping_value(
                 strato_node_url, headers, table_prefix, 'adminBalances', token_addr
             )
-            if val is not None:
-                result[f'adminBalance{suffix}'] = val
+            admin_balances.append(self._to_int(val) if val is not None else 0)
 
             oracle_addr = self._fetch_mapping_value(
                 strato_node_url, headers, table_prefix, 'rateOracles', token_addr
             )
+            price = 0
             if oracle_addr and str(oracle_addr).replace('0', '') != '':
-                price = self._fetch_oracle_price(
+                fetched = self._fetch_oracle_price(
                     strato_node_url, headers, str(oracle_addr), token_addr
                 )
-                if price is not None and int(price) > 0:
-                    result[f'rateOraclePrice{suffix}'] = price
+                if fetched is not None and int(fetched) > 0:
+                    price = int(fetched)
+            oracle_prices.append(price)
+
+            # For coins 0 and 1, the caller already has tokenABalance/tokenBBalance
+            # from the main pool query; only fetch from mapping for coin index >= 2.
+            if idx >= 2:
+                reserves.append(self._fetch_token_balance(
+                    strato_node_url, headers, table_prefix, token_addr
+                ))
+            else:
+                reserves.append(0)  # placeholder; filled by caller from top-level fields
+
+        result['coin_rate_multipliers'] = rate_multipliers
+        result['coin_admin_balances'] = admin_balances
+        result['coin_oracle_prices'] = oracle_prices
+        result['coin_reserves'] = reserves
 
     def _fetch_mapping_value(
         self, strato_node_url: str, headers: dict,
@@ -380,6 +483,73 @@ class Pool:
                 continue
         return None
     
+    def _populate_extra_coin(
+        self, token: 'Token', token_addr: str,
+        strato_node_url: str, access_token: str, wallet_addr: str
+    ) -> None:
+        """Fetch symbol, name, balance, and allowance for an extra coin (index >= 2)."""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        for table in ("BlockApps-Token", "Token"):
+            try:
+                resp = requests.get(
+                    f'{strato_node_url}/cirrus/search/{table}',
+                    headers=headers,
+                    params={'address': f'eq.{token_addr}', 'select': '_symbol,_name'},
+                    timeout=10000
+                )
+                if resp.ok:
+                    data = resp.json()
+                    if data:
+                        token.symbol = data[0].get('_symbol', '')
+                        token.name = data[0].get('_name', '')
+                        break
+            except Exception:
+                continue
+
+        for table in ("BlockApps-Token-_balances", "Token-_balances"):
+            try:
+                resp = requests.get(
+                    f'{strato_node_url}/cirrus/search/{table}',
+                    headers=headers,
+                    params={
+                        'address': f'eq.{token_addr}',
+                        'key': f'eq.{wallet_addr}',
+                        'select': 'value::text'
+                    },
+                    timeout=10000
+                )
+                if resp.ok:
+                    data = resp.json()
+                    if data:
+                        token.balance = self._to_int(data[0].get('value', 0))
+                        break
+            except Exception:
+                continue
+
+        for table in ("BlockApps-Token-_allowances", "Token-_allowances"):
+            try:
+                resp = requests.get(
+                    f'{strato_node_url}/cirrus/search/{table}',
+                    headers=headers,
+                    params={
+                        'address': f'eq.{token_addr}',
+                        'key': f'eq.{wallet_addr}',
+                        'key2': f'eq.{self.address}',
+                        'select': 'value::text'
+                    },
+                    timeout=10000
+                )
+                if resp.ok:
+                    data = resp.json()
+                    if data:
+                        token.allowance = self._to_int(data[0].get('value', 0))
+                        break
+            except Exception:
+                continue
+
     def get_reserves(self) -> Tuple[int, int]:
         """
         Get current pool reserves from Cirrus search
@@ -408,6 +578,18 @@ class Pool:
             self.fetch_pool_data()
         return self.is_stable
 
+    def _compute_amp(self) -> int:
+        """Compute the current amplification parameter accounting for ramping."""
+        p = self._pool_data
+        amp = p.futureA
+        now = int(time.time())
+        if p.futureATime > 0 and now < p.futureATime and p.initialATime < p.futureATime:
+            if p.futureA > p.initialA:
+                amp = p.initialA + ((p.futureA - p.initialA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+            else:
+                amp = p.initialA - ((p.initialA - p.futureA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+        return int(amp) if amp > 0 else 0
+
     def get_stable_params(self) -> dict:
         """
         Return stable-pool parameters needed for contract-aligned quote math,
@@ -420,47 +602,76 @@ class Pool:
         if not p or not p.isStable:
             return {}
 
-        now = int(time.time())
-        amp = p.futureA
-        if p.futureATime > 0 and now < p.futureATime and p.initialATime < p.futureATime:
-            if p.futureA > p.initialA:
-                amp = p.initialA + ((p.futureA - p.initialA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
-            else:
-                amp = p.initialA - ((p.initialA - p.futureA) * (now - p.initialATime)) // (p.futureATime - p.initialATime)
+        amp = self._compute_amp()
 
-        params = {}
+        params: dict = {}
         if amp > 0:
-            params["amp"] = int(amp)
+            params["amp"] = amp
         if p.stableFee > 0:
             params["fee"] = int(p.stableFee)
         if p.offpegFeeMultiplier > 0:
             params["offpeg_fee_multiplier"] = int(p.offpegFeeMultiplier)
 
-        rate_mult_a = p.rateMultiplierA if p.rateMultiplierA > 0 else WEI_SCALE
-        oracle_price_a = p.rateOraclePriceA if p.rateOraclePriceA > 0 else WEI_SCALE
-        params["rate_a"] = (rate_mult_a * oracle_price_a) // WEI_SCALE
+        # Build per-coin stored rates
+        n = len(p.coin_rate_multipliers) if p.coin_rate_multipliers else 0
+        rates: List[int] = []
+        for idx in range(n):
+            rm = p.coin_rate_multipliers[idx] if p.coin_rate_multipliers[idx] > 0 else WEI_SCALE
+            op = p.coin_oracle_prices[idx] if p.coin_oracle_prices[idx] > 0 else WEI_SCALE
+            rates.append((rm * op) // WEI_SCALE)
+        params["rates"] = rates
 
-        rate_mult_b = p.rateMultiplierB if p.rateMultiplierB > 0 else WEI_SCALE
-        oracle_price_b = p.rateOraclePriceB if p.rateOraclePriceB > 0 else WEI_SCALE
-        params["rate_b"] = (rate_mult_b * oracle_price_b) // WEI_SCALE
+        # Legacy 2-coin fields for backward compat
+        if len(rates) >= 2:
+            params["rate_a"] = rates[0]
+            params["rate_b"] = rates[1]
 
         logger.info(
-            "Stable params: amp=%s, fee=%s, offpeg=%s, rate_a=%s, rate_b=%s",
+            "Stable params: amp=%s, fee=%s, offpeg=%s, rates=%s",
             params.get("amp"), params.get("fee"), params.get("offpeg_fee_multiplier"),
-            params.get("rate_a"), params.get("rate_b"),
+            rates,
         )
 
         return params
 
     def get_effective_reserves(self) -> Tuple[int, int]:
         """
-        Get effective pool reserves (tokenBalances - adminBalances) to match
+        Get effective 2-coin pool reserves (tokenBalances - adminBalances) to match
         the contract's _balances() used in swap math.
         """
         pool_data = self.fetch_pool_data()
         reserve_a = max(0, pool_data.tokenABalance - pool_data.adminBalanceA)
         reserve_b = max(0, pool_data.tokenBBalance - pool_data.adminBalanceB)
         return reserve_a, reserve_b
+
+    def get_effective_reserves_n(self) -> List[int]:
+        """
+        Get effective reserves for all n coins (reserves - adminBalances).
+        For coins 0 and 1, uses tokenABalance/tokenBBalance from the main query.
+        For coins 2+, uses values fetched from the tokenBalances mapping.
+        """
+        p = self.fetch_pool_data()
+        n = len(p.coin_addresses) if p.coin_addresses else 2
+
+        raw_reserves = list(p.coin_reserves) if p.coin_reserves else []
+        # Backfill coins 0/1 from the top-level fields
+        if len(raw_reserves) >= 2:
+            raw_reserves[0] = p.tokenABalance
+            raw_reserves[1] = p.tokenBBalance
+        else:
+            raw_reserves = [p.tokenABalance, p.tokenBBalance]
+
+        admin = list(p.coin_admin_balances) if p.coin_admin_balances else [0] * n
+        while len(admin) < len(raw_reserves):
+            admin.append(0)
+
+        return [max(0, raw_reserves[i] - admin[i]) for i in range(len(raw_reserves))]
+
+    def n_coins(self) -> int:
+        """Return the number of coins in this pool (2 for AMM or 2-coin stable)."""
+        if self._pool_data and self._pool_data.coin_addresses:
+            return len(self._pool_data.coin_addresses)
+        return 2
     
     def get_price(self) -> int:
         """
@@ -519,7 +730,20 @@ class Pool:
             'minAmountOut': min_amount_out_guarded,
             'deadline': deadline
         }
-        
+
+        logger.info(
+            "swap preflight pool=%s is_stable=%s is_a_to_b=%s "
+            "slippage_factor=%s amount_in=%s min_out_sim=%s min_out_onchain(_minDy)=%s deadline=%s",
+            self.address,
+            self.is_stable,
+            is_a_to_b,
+            slippage_factor,
+            amount_in,
+            min_amount_out,
+            min_amount_out_guarded,
+            deadline,
+        )
+
         transaction = {
             'from': client.account.address,
             'to': self.address,
@@ -527,7 +751,45 @@ class Pool:
             'method': 'swap',
             'args': args
         }
-        
+
+        return client.send_transaction(transaction)
+
+    def exchange_stable(self, i: int, j: int, amount_in: int, min_amount_out: int) -> str:
+        """
+        Execute a StablePool exchange by coin indices.
+        Calls exchange(i, j, _dx, _minDy, _receiver) on the contract.
+        """
+        client = strato_client()
+        slippage_factor = self.slippage_factor_stable
+        min_amount_out_guarded = int(min_amount_out * slippage_factor)
+        args = {
+            'i': i,
+            'j': j,
+            '_dx': amount_in,
+            '_minDy': min_amount_out_guarded,
+            '_receiver': client.account.address,
+        }
+
+        logger.info(
+            "exchange_stable preflight pool=%s i=%s j=%s "
+            "slippage_factor=%s amount_in(_dx)=%s min_out_sim=%s min_out_onchain(_minDy)=%s receiver=%s",
+            self.address,
+            i,
+            j,
+            slippage_factor,
+            amount_in,
+            min_amount_out,
+            min_amount_out_guarded,
+            client.account.address,
+        )
+
+        transaction = {
+            'from': client.account.address,
+            'to': self.address,
+            'contract_address': self.address,
+            'method': 'exchange',
+            'args': args,
+        }
         return client.send_transaction(transaction)
     
     def get_position_data(self, token_address: str) -> int:
