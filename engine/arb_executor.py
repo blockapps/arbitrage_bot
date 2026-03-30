@@ -111,6 +111,7 @@ class ArbitrageExecutor:
 
         except Exception as e:
             logger.error(f"Error scanning for opportunities: {e}")
+            notify_error(f"Error scanning for opportunities: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -128,6 +129,7 @@ class ArbitrageExecutor:
             )
         except ValueError as e:
             logger.error("Failed to get oracle prices: %s", e)
+            notify_error(f"Failed to get oracle prices: {e}")
             return None
 
         if price_b <= 0:
@@ -364,6 +366,7 @@ class ArbitrageExecutor:
         except Exception as e:
             error_msg = str(e)
             logger.error("Arbitrage execution failed: %s", error_msg)
+            notify_error(f"Arbitrage execution failed: {error_msg}")
             logger.error(
                 "execution context at failure: amount_in=%s expected_output(used as min basis)=%s "
                 "use_exchange=%s pool.is_stable=%s coin_in=%s coin_out=%s direction=%s",
