@@ -3,8 +3,11 @@ pools:
   - address: "0000000000000000000000000000000000001017" # ETH-USDST pool
   - address: "000000000000000000000000000000000000101b" # GOLDST-USDST pool
   - address: "000000000000000000000000000000000000101d" # SILVST-USDST pool
+  # Stable Pools
   - address: "bab35f9fe024e2735edae7a9c0aba4db260a649c" # sUSDS-USDST pool
   - address: "5888fbe6d6774c1d5788a7b631fc2a2fe88c44c6" # syrupUSDC-USDST pool
+  - address: "3d1dc151402858521bf9beaa8c72a68c9b4fc2fe" # USDT-USDC-USDST pool
+
 # Trading Parameters
 trading:
   fee_bps: 30 # Pool fee in basis points (0.3%)

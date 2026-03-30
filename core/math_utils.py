@@ -3,7 +3,7 @@ Mathematical utilities for arbitrage calculations
 All calculations use integer arithmetic in wei scale for precision
 """
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import math
 
@@ -162,20 +162,23 @@ def _stable_dynamic_fee(xpi: int, xpj: int, fee: int, offpeg_fee_multiplier: int
     return num // den if den > 0 else fee
 
 
-def _stable_get_d(xp0: int, xp1: int, amp: int) -> int:
-    if xp0 <= 0 or xp1 <= 0:
+def _stable_get_d(xp: List[int], amp: int) -> int:
+    """Compute StableSwap invariant D for n coins. Matches contract getD()."""
+    n = len(xp)
+    if n < 2 or any(x <= 0 for x in xp):
         return 0
-    s = xp0 + xp1
+    s = sum(xp)
     d = s
-    ann = amp * 2
+    ann = amp * n
+    nn = n ** n
     for _ in range(256):
         d_p = d
-        d_p = (d_p * d) // xp0
-        d_p = (d_p * d) // xp1
-        d_p //= 4  # n^n for n=2
+        for x in xp:
+            d_p = (d_p * d) // x
+        d_p //= nn
         d_prev = d
-        num = (((ann * s) // STABLE_A_PRECISION) + (d_p * 2)) * d
-        den = ((((ann - STABLE_A_PRECISION) * d) // STABLE_A_PRECISION) + (3 * d_p))
+        num = (((ann * s) // STABLE_A_PRECISION) + (d_p * n)) * d
+        den = ((((ann - STABLE_A_PRECISION) * d) // STABLE_A_PRECISION) + ((n + 1) * d_p))
         if den <= 0:
             return 0
         d = num // den
@@ -184,25 +187,28 @@ def _stable_get_d(xp0: int, xp1: int, amp: int) -> int:
     return 0
 
 
-def _stable_get_y(i: int, j: int, x: int, xp0: int, xp1: int, amp: int, d: int) -> int:
-    if i == j or i < 0 or j < 0 or i > 1 or j > 1:
+def _stable_get_y(i: int, j: int, x: int, xp: List[int], amp: int, d: int) -> int:
+    """Compute output balance y for token j given new input balance x for token i.
+    Matches contract getY()."""
+    n = len(xp)
+    if i == j or i < 0 or j < 0 or i >= n or j >= n:
         return 0
-    ann = amp * 2
+    ann = amp * n
     c = d
     s_ = 0
-    for idx in (0, 1):
+    for idx in range(n):
         if idx == i:
             _x = x
         elif idx != j:
-            _x = xp0 if idx == 0 else xp1
+            _x = xp[idx]
         else:
             continue
         if _x <= 0:
             return 0
         s_ += _x
-        c = (c * d) // (_x * 2)
+        c = (c * d) // (_x * n)
 
-    c = (c * d * STABLE_A_PRECISION) // (ann * 2)
+    c = (c * d * STABLE_A_PRECISION) // (ann * n)
     b = s_ + ((d * STABLE_A_PRECISION) // ann)
     y = d
     for _ in range(256):
@@ -218,146 +224,117 @@ def _stable_get_y(i: int, j: int, x: int, xp0: int, xp1: int, amp: int, d: int) 
 
 def _stable_quote_output(
     dx: int,
-    reserve_x: int,
-    reserve_y: int,
-    is_x_to_y: bool,
+    reserves: List[int],
+    rates: List[int],
+    i: int,
+    j: int,
     amp: int,
     fee: int,
     offpeg_fee_multiplier: int,
-    rate_x: int = WEI_SCALE,
-    rate_y: int = WEI_SCALE,
 ) -> int:
-    if dx <= 0 or reserve_x <= 0 or reserve_y <= 0 or amp <= 0:
+    """Simulate a StableSwap exchange of dx tokens from coin i to coin j.
+    Returns the net output amount in token j native units."""
+    n = len(reserves)
+    if dx <= 0 or n < 2 or i == j or i >= n or j >= n or amp <= 0:
+        return 0
+    if any(r <= 0 for r in reserves):
         return 0
 
-    xp0 = (rate_x * reserve_x) // WEI_SCALE
-    xp1 = (rate_y * reserve_y) // WEI_SCALE
-
-    i, j = (0, 1) if is_x_to_y else (1, 0)
-    rate_i = rate_x if i == 0 else rate_y
-    rate_j = rate_y if j == 1 else rate_x
-    xp_i = xp0 if i == 0 else xp1
-    xp_j = xp1 if j == 1 else xp0
-
-    x = xp_i + (dx * rate_i) // WEI_SCALE
-    d = _stable_get_d(xp0, xp1, amp)
+    xp = [(rates[k] * reserves[k]) // WEI_SCALE for k in range(n)]
+    x_new = xp[i] + (dx * rates[i]) // WEI_SCALE
+    d = _stable_get_d(xp, amp)
     if d <= 0:
         return 0
-    y = _stable_get_y(i, j, x, xp0, xp1, amp, d)
+    y = _stable_get_y(i, j, x_new, xp, amp, d)
     if y <= 0:
         return 0
-    dy = xp_j - y - 1
+    dy = xp[j] - y - 1
     if dy <= 0:
         return 0
-    dy_fee = (dy * _stable_dynamic_fee((xp_i + x) // 2, (xp_j + y) // 2, fee, offpeg_fee_multiplier)) // STABLE_FEE_DENOMINATOR
-    dy_net = ((dy - dy_fee) * WEI_SCALE) // rate_j
+    dy_fee = (dy * _stable_dynamic_fee((xp[i] + x_new) // 2, (xp[j] + y) // 2, fee, offpeg_fee_multiplier)) // STABLE_FEE_DENOMINATOR
+    dy_net = ((dy - dy_fee) * WEI_SCALE) // rates[j]
     return dy_net if dy_net > 0 else 0
 
 
-def find_optimal_trade_stable_auto(
-    reserve_x: int,
-    reserve_y: int,
-    oracle_price_xy: int,   # Y per X, 1e18
-    balance_x: int,
-    balance_y: int,
-    fee_bps: int,
-    min_profit: int,        # token Y wei (caller converts from USD)
-    stable_params: Optional[dict] = None,
-    pool_price_xy_override: Optional[int] = None
-) -> Tuple[Optional[str], Optional[Tuple[str, int, int, int]]]:
+def find_optimal_trade_stable_n(
+    reserves: List[int],
+    rates: List[int],
+    oracle_prices: List[int],
+    balances: List[int],
+    amp: int,
+    fee: int,
+    offpeg_fee_multiplier: int,
+    min_profit_usd: int,
+) -> Tuple[Optional[str], Optional[Tuple[int, int, int, int, int]]]:
     """
-    Stable-pool arbitrage sizing via ternary search for profit-maximizing trade.
+    N-coin stable-pool arbitrage: find the most profitable (i, j) swap.
+
+    Enumerates all directed pairs where the bot holds token i, runs a
+    ternary search on the concave profit function for each, and returns
+    the single best trade.
+
+    Returns:
+        (reason, None) on failure, or
+        (None, (i, j, amount_in, expected_out, profit_j))
+        where profit_j is denominated in token j (output token).
     """
-    if reserve_x <= 0 or reserve_y <= 0 or oracle_price_xy <= 0:
-        return ("Invalid inputs (reserve_x={}, reserve_y={}, oracle_price_xy={})".format(reserve_x, reserve_y, oracle_price_xy), None)
-    if balance_x <= 0 and balance_y <= 0:
-        return ("No balances (balance_x={}, balance_y={})".format(balance_x, balance_y), None)
-    if not (0 <= fee_bps < BPS_DENOM):
-        return ("Invalid fee_bps ({})".format(fee_bps), None)
+    n = len(reserves)
+    if n < 2 or len(rates) != n or len(oracle_prices) != n or len(balances) != n:
+        return ("Invalid array lengths", None)
+    if any(r <= 0 for r in reserves) or amp <= 0:
+        return ("Invalid reserves or amp", None)
+    if any(p <= 0 for p in oracle_prices):
+        return ("Invalid oracle prices", None)
 
-    pool_price_xy = int(pool_price_xy_override) if pool_price_xy_override and pool_price_xy_override > 0 else (reserve_y * WEI_SCALE) // reserve_x
-    if pool_price_xy <= 0:
-        return ("Invalid pool price ({})".format(pool_price_xy), None)
+    quote_kwargs = dict(reserves=reserves, rates=rates, amp=amp,
+                        fee=fee, offpeg_fee_multiplier=offpeg_fee_multiplier)
 
-    params = stable_params or {}
-    amp = int(params.get("amp", 100 * STABLE_A_PRECISION))
-    fee_1e10 = int(params.get("fee", fee_bps * 1_000_000))
-    offpeg_fee_multiplier = int(params.get("offpeg_fee_multiplier", STABLE_FEE_DENOMINATOR))
-    rate_x = int(params.get("rate_a", WEI_SCALE))
-    rate_y = int(params.get("rate_b", WEI_SCALE))
+    best = None  # (profit_usd, i, j, amount_in, expected_out, profit_j)
 
-    quote_kwargs = dict(
-        reserve_x=reserve_x, reserve_y=reserve_y,
-        amp=amp, fee=fee_1e10, offpeg_fee_multiplier=offpeg_fee_multiplier,
-        rate_x=rate_x, rate_y=rate_y,
-    )
+    for i in range(n):
+        if balances[i] <= 0:
+            continue
+        for j in range(n):
+            if i == j:
+                continue
+            oracle_ratio_ij = (oracle_prices[i] * WEI_SCALE) // oracle_prices[j]
+            max_input = balances[i]
 
-    if pool_price_xy < oracle_price_xy:
-        # Pool underprices X -> buy X with Y (Y->X)
-        # Wallet balance is the only cap; the ternary search on the concave
-        # profit function naturally finds the optimal size without an
-        # artificial reserve-fraction limit (which is too tight for StableSwap).
-        max_input = balance_y if balance_y > 0 else 0
-        if max_input <= 0:
-            return ("No Y balance for Y->X (balance_y={})".format(balance_y), None)
+            def _profit(dx, _i=i, _j=j, _ratio=oracle_ratio_ij):
+                dy = _stable_quote_output(dx=dx, i=_i, j=_j, **quote_kwargs)
+                if dy <= 0:
+                    return -(dx or 1)
+                return dy - (dx * _ratio) // WEI_SCALE
 
-        def buy_profit(dy):
-            x_out = _stable_quote_output(dx=dy, is_x_to_y=False, **quote_kwargs)
-            if x_out <= 0:
-                return -(dy or 1)
-            return (x_out * oracle_price_xy) // WEI_SCALE - dy
+            lo, hi = 1, max_input
+            for _ in range(128):
+                if hi - lo < 3:
+                    break
+                m1 = lo + (hi - lo) // 3
+                m2 = hi - (hi - lo) // 3
+                if _profit(m1) < _profit(m2):
+                    lo = m1
+                else:
+                    hi = m2
 
-        lo, hi = 1, max_input
-        for _ in range(128):
-            if hi - lo < 3:
-                break
-            m1 = lo + (hi - lo) // 3
-            m2 = hi - (hi - lo) // 3
-            if buy_profit(m1) < buy_profit(m2):
-                lo = m1
-            else:
-                hi = m2
+            best_dx = (lo + hi) // 2
+            dy_out = _stable_quote_output(dx=best_dx, i=i, j=j, **quote_kwargs)
+            if dy_out <= 0:
+                continue
+            profit_j = dy_out - (best_dx * oracle_ratio_ij) // WEI_SCALE
+            if profit_j <= 0:
+                continue
 
-        best_dy = (lo + hi) // 2
-        x_out = _stable_quote_output(dx=best_dy, is_x_to_y=False, **quote_kwargs)
-        if x_out <= 0:
-            return ("No output for Y->X", None)
-        profit_y = (x_out * oracle_price_xy) // WEI_SCALE - best_dy
-        if profit_y > 0 and profit_y >= min_profit:
-            return (None, ("Y->X", best_dy, x_out, profit_y))
-        return ("Profit too low for Y->X (profit={:.6f}, min_profit={:.6f})".format(profit_y / WEI_SCALE, min_profit / WEI_SCALE), None)
+            min_profit_j = (min_profit_usd * WEI_SCALE) // oracle_prices[j] if oracle_prices[j] > 0 else 0
+            if profit_j < min_profit_j:
+                continue
 
-    if pool_price_xy > oracle_price_xy:
-        # Pool overprices X -> sell X for Y (X->Y)
-        max_input = balance_x if balance_x > 0 else 0
-        if max_input <= 0:
-            return ("No X balance for X->Y (balance_x={})".format(balance_x), None)
+            profit_usd = (profit_j * oracle_prices[j]) // WEI_SCALE
+            if best is None or profit_usd > best[0]:
+                best = (profit_usd, i, j, best_dx, dy_out, profit_j)
 
-        def sell_profit(dx):
-            y_out = _stable_quote_output(dx=dx, is_x_to_y=True, **quote_kwargs)
-            if y_out <= 0:
-                return -(dx or 1)
-            return y_out - (dx * oracle_price_xy) // WEI_SCALE
-
-        lo, hi = 1, max_input
-        for _ in range(128):
-            if hi - lo < 3:
-                break
-            m1 = lo + (hi - lo) // 3
-            m2 = hi - (hi - lo) // 3
-            if sell_profit(m1) < sell_profit(m2):
-                lo = m1
-            else:
-                hi = m2
-
-        best_dx = (lo + hi) // 2
-        y_out = _stable_quote_output(dx=best_dx, is_x_to_y=True, **quote_kwargs)
-        if y_out <= 0:
-            return ("No output for X->Y", None)
-        profit_y = y_out - (best_dx * oracle_price_xy) // WEI_SCALE
-        if profit_y > 0 and profit_y >= min_profit:
-            return (None, ("X->Y", best_dx, y_out, profit_y))
-        return ("Profit too low for X->Y (profit={:.6f}, min_profit={:.6f})".format(profit_y / WEI_SCALE, min_profit / WEI_SCALE), None)
-
-    return ("Pool price equals oracle price (no arbitrage opportunity)", None)
+    if best is None:
+        return ("No profitable stable pair found", None)
+    _, i, j, amount_in, expected_out, profit_j = best
+    return (None, (i, j, amount_in, expected_out, profit_j))
 
