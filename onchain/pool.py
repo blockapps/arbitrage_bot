@@ -231,16 +231,6 @@ class Pool:
             # Create PoolData with references to token objects
             is_stable_raw = pool_dict.get('isStable', False)
             is_stable = str(is_stable_raw).lower() in ('true', '1', 't', 'yes')
-            # Cirrus returns isStable=False for this pool despite it being a StablePool contract.
-            _FORCE_STABLE_POOLS = {
-                '902651e10ab7d64fa7d0480657ac36676d155f2e',
-            }
-            if self.address.lower() in _FORCE_STABLE_POOLS and not is_stable:
-                logger.warning(
-                    "fetch_pool_data: overriding isStable=False -> True for known stable pool %s",
-                    self.address,
-                )
-                is_stable = True
             self.is_stable = is_stable
             token_a_addr = token_a_dict.get('address', '')
             token_b_addr = token_b_dict.get('address', '')
