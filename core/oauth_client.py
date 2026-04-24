@@ -16,6 +16,51 @@ logger = logging.getLogger(__name__)
 TOKEN_LIFETIME_THRESHOLD_SECONDS = 10
 
 
+HTTP_TIMEOUT = (5, 30)  # (connect_timeout, read_timeout)
+
+# Retry transient network errors (timeouts, connection resets, 5xx).
+MAX_RETRIES = 3
+RETRY_BACKOFF_BASE_SECONDS = 1.5
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Return True for network errors worth retrying."""
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, 'response', None)
+        if resp is not None and 500 <= resp.status_code < 600:
+            return True
+    return False
+
+
+def _request_with_retry(method: str, url: str, **kwargs) -> requests.Response:
+    """Perform an HTTP request with exponential backoff on transient errors.
+
+    Non-transient errors (4xx, JSON/parse errors) are raised immediately so we
+    don't hammer the server with doomed requests.
+    """
+    kwargs.setdefault('timeout', HTTP_TIMEOUT)
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.request(method, url, **kwargs)
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            last_exc = e
+            if attempt < MAX_RETRIES and _is_transient(e):
+                delay = RETRY_BACKOFF_BASE_SECONDS * (2 ** (attempt - 1))
+                logger.warning(
+                    f'OAuth: {method} {url} attempt {attempt}/{MAX_RETRIES} '
+                    f'failed ({e}); retrying in {delay:.1f}s'
+                )
+                time.sleep(delay)
+                continue
+            break
+    assert last_exc is not None
+    raise last_exc
+
 class OAuthClient:
     """OAuth client for Strato blockchain authentication using password grant flow"""
     
@@ -55,16 +100,15 @@ class OAuthClient:
         """Get OAuth token endpoint from discovery URL"""
         if self.token_endpoint:
             return self.token_endpoint
-        
+
+        logger.info('OAuth: Discovering token endpoint...')
         try:
-            logger.info('OAuth: Discovering token endpoint...')
-            response = requests.get(self.discovery_url, timeout=10)
-            response.raise_for_status()
+            response = _request_with_retry('GET', self.discovery_url)
             self.token_endpoint = response.json().get('token_endpoint')
-            
+
             if not self.token_endpoint:
                 raise ValueError('Token endpoint not found in discovery document')
-            
+
             logger.info(f'OAuth: Token endpoint discovered: {self.token_endpoint}')
             return self.token_endpoint
         except Exception as e:
@@ -83,46 +127,49 @@ class OAuthClient:
         return self.access_token
     
     def refresh_token(self) -> str:
-        """Refresh OAuth access token using password grant"""
+        """Refresh OAuth access token using password grant, with retries on transient errors."""
+        token_endpoint = self.get_token_endpoint()
+
+        token_data = {
+            'grant_type': 'password',
+            'username': self.username,
+            'password': self.password,
+            'client_id': self.client_id,
+            'client_secret': self.client_secret
+        }
+        headers = {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/json'
+        }
+
         try:
-            # Get the token endpoint from discovery
-            token_endpoint = self.get_token_endpoint()
-            
-            # Use password grant to authenticate as the specific username
-            token_data = {
-                'grant_type': 'password',
-                'username': self.username,
-                'password': self.password,
-                'client_id': self.client_id,
-                'client_secret': self.client_secret
-            }
-            
-            response = requests.post(
+            response = _request_with_retry(
+                'POST',
                 token_endpoint,
                 data=token_data,
-                headers={
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'Accept': 'application/json'
-                },
-                timeout=10
+                headers=headers,
             )
-            response.raise_for_status()
-            
             data = response.json()
-            if data.get('access_token'):
-                self.access_token = data['access_token']
-                expires_in = data.get('expires_in', 3600)  # Default 1 hour
-                self.token_expiry = time.time() + expires_in
-                
-                logger.info('OAuth: Access token refreshed successfully')
-                return self.access_token
-            else:
+            if not data.get('access_token'):
                 raise ValueError('No access token in response')
-        except requests.exceptions.RequestException as e:
+
+            self.access_token = data['access_token']
+            expires_in = data.get('expires_in', 3600)
+            self.token_expiry = time.time() + expires_in
+            logger.info('OAuth: Access token refreshed successfully')
+            return self.access_token
+        except Exception as e:
             error_message = str(e)
-            if hasattr(e.response, 'json') and e.response.json():
-                error_data = e.response.json()
-                error_message = error_data.get('error_description') or error_data.get('error', error_message)
+            resp = getattr(e, 'response', None)
+            if resp is not None:
+                try:
+                    error_data = resp.json()
+                    error_message = (
+                        error_data.get('error_description')
+                        or error_data.get('error', error_message)
+                    )
+                except Exception:
+                    pass
             logger.error(f'OAuth: Error getting access token: {error_message}')
             raise ValueError(f'OAuth authentication failed: {error_message}')
     
@@ -139,22 +186,21 @@ class OAuthClient:
     def _fetch_user_address(self) -> str:
         """Fetch user address from Strato node during initialization"""
         access_token = self.get_access_token()
-        response = requests.get(
+        response = _request_with_retry(
+            'GET',
             f'{self.strato_node_url}/strato/v2.3/key',
             headers={
                 'Authorization': f'Bearer {access_token}',
                 'Content-Type': 'application/json'
             },
-            timeout=10
         )
-        response.raise_for_status()
-        
+
         data = response.json()
         user_address = data.get('address')
-        
+
         if not user_address:
             raise ValueError('No address in response')
-        
+
         logger.info(f'OAuth: User address retrieved: {user_address}')
         return user_address
     
