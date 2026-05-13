@@ -12,9 +12,9 @@ import logging
 from decimal import Decimal
 
 from core.strato_client import strato_client
-from core.constants import WEI_SCALE, BLOCKAPPS_ORACLE_TOKENS
+from core.constants import WEI_SCALE
 from onchain.pool import Pool
-from market.oracle import PriceOracle, get_external_symbol
+from market.oracle import PriceOracle
 from engine.arb_executor import ArbitrageExecutor
 from engine.liquidation_executor import LiquidationExecutor
 from engine.helpers import ensure_pool_approvals
@@ -88,12 +88,12 @@ class ArbitrageBot:
             )
             pool.fetch_pool_data()
             
-            # Auto-register BlockApps tokens based on token names
-            # These use the on-chain BlockApps PriceOracle instead of Alchemy
+            # Register every non-USDST coin with the BlockApps on-chain price oracle.
+            # USDST is hardcoded to $1 inside the oracle and does not need registration.
             for token in pool.coins:
-                external_symbol = get_external_symbol(token.symbol)
-                if external_symbol in BLOCKAPPS_ORACLE_TOKENS:
-                    self.oracle.register_blockapps_token(external_symbol, token.address)
+                if token.symbol == "USDST":
+                    continue
+                self.oracle.register_blockapps_token(token.symbol, token.address)
             
             executor = ArbitrageExecutor(
                 token_a=pool.token_a,
@@ -119,7 +119,7 @@ class ArbitrageBot:
         all_token_symbols = set()
         for executor in self.executors:
             for coin in executor.pool.coins:
-                all_token_symbols.add(get_external_symbol(coin.symbol))
+                all_token_symbols.add(coin.symbol)
         
         if all_token_symbols:
             self.oracle.fetch_all_prices(list(all_token_symbols), force_refresh=True)

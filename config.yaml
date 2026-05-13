@@ -11,7 +11,7 @@ pools:
 # Trading Parameters
 trading:
   fee_bps: 30 # Pool fee in basis points (0.3%)
-  min_profit: 0.01 
+  min_profit: 0.01
   slippage_factor_amm: 0.96 # 4% slippage tolerance for AMM pools
   slippage_factor_stable: 0.92 # 8% slippage tolerance for stable pools
 
