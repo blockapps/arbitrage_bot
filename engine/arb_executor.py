@@ -188,8 +188,6 @@ class ArbitrageExecutor:
     # Stable-pool scan — n-coin generalised path
     # ------------------------------------------------------------------
     def _scan_stable(self) -> Optional[ArbitrageOpportunity]:
-        from market.oracle import get_external_symbol
-
         coins = self.pool.coins
         n = len(coins)
 
@@ -198,20 +196,17 @@ class ArbitrageExecutor:
             logger.warning("No arbitrage opportunity: Invalid reserves %s", reserves)
             return None
 
-        symbols = [get_external_symbol(c.symbol) for c in coins]
+        symbols = [c.symbol for c in coins]
         try:
             price_map = self.oracle.fetch_all_prices(symbols, force_refresh=True)
-        except Exception as e:
+        except ValueError as e:
             logger.error("Failed to get oracle prices: %s", e)
+            notify_error(f"Failed to get oracle prices: {e}")
             return None
 
-        oracle_prices = []
-        for sym in symbols:
-            p = price_map.get(sym)
-            if not p or p <= 0:
-                logger.warning("No oracle price for %s", sym)
-                return None
-            oracle_prices.append(p)
+        # fetch_all_prices raises if any requested non-USDST price is missing,
+        # so price_map is guaranteed to contain every symbol with a positive value.
+        oracle_prices = [price_map[s] for s in symbols]
 
         balances = [check_gas_balance(c, c.balance) for c in coins]
         if all(b <= 0 for b in balances):
@@ -337,21 +332,23 @@ class ArbitrageExecutor:
             transactions.append({'type': 'swap', 'hash': swap_hash, 'timestamp': time.time()})
             client.wait_for_transaction(swap_hash)
             
-            # Fetch fresh output-token price from oracle for USD conversion
-            if opportunity.coin_out_idx >= 0 and opportunity.coin_out_idx < len(self.pool.coins):
-                from market.oracle import get_external_symbol
-                out_sym = get_external_symbol(self.pool.coins[opportunity.coin_out_idx].symbol)
-                price_map = self.oracle.fetch_all_prices([out_sym], force_refresh=True)
-                price_out = price_map.get(out_sym)
-                if not price_out or price_out <= 0:
-                    logger.warning("Could not fetch output token price for profit tracking (symbol=%s)", out_sym)
-                    price_out = 0
-            else:
-                _, price_out = self.oracle.fetch_token_prices(
-                    self.token_a.symbol,
-                    self.token_b.symbol,
-                    force_refresh=True
-                )
+            # Fetch fresh output-token price from oracle for USD conversion.
+            # Failures here are non-fatal: the swap already succeeded; we just
+            # skip cumulative-profit accounting for this trade and warn.
+            try:
+                if opportunity.coin_out_idx >= 0 and opportunity.coin_out_idx < len(self.pool.coins):
+                    out_sym = self.pool.coins[opportunity.coin_out_idx].symbol
+                    price_map = self.oracle.fetch_all_prices([out_sym], force_refresh=True)
+                    price_out = price_map.get(out_sym) or 0
+                else:
+                    _, price_out = self.oracle.fetch_token_prices(
+                        self.token_a.symbol,
+                        self.token_b.symbol,
+                        force_refresh=True,
+                    )
+            except ValueError as e:
+                logger.warning("Could not fetch output token price for profit tracking: %s", e)
+                price_out = 0
             
             if price_out > 0:
                 update_cumulative_profit(opportunity.estimated_profit, price_out)

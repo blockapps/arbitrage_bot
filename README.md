@@ -16,7 +16,7 @@ arbitrage_bot/
 │   ├── pool.py        # AMM pool wrapper (includes position tracking)
 │   └── cdp.py         # CDP liquidation contract wrapper
 ├── market/            # Market data
-│   └── oracle.py      # Price oracle (Alchemy API)
+│   └── oracle.py      # Price oracle (BlockApps on-chain PriceOracle)
 ├── engine/            # Arbitrage & liquidation logic
 │   ├── arb_executor.py        # Opportunity detection and trade execution
 │   ├── liquidation_executor.py # CDP liquidation scanning and execution
@@ -51,43 +51,34 @@ arbitrage_bot/
    OAUTH_CLIENT_ID=your_oauth_client_id
    OAUTH_CLIENT_SECRET=your_oauth_client_secret
    OAUTH_DISCOVERY_URL=https://your-oauth-discovery-url.com
-
-   # Alchemy API Key for real-time token prices (REQUIRED)
-   ALCHEMY_API_KEY=your_alchemy_api_key_here
    ```
 
-   **Getting an Alchemy API Key:**
-   - Sign up for free at https://www.alchemy.com/
-   - Create a new app for "Ethereum" → "Mainnet"
-   - Copy your API key from the dashboard
-   - The oracle fetches real-time token prices (ETH, BTC, etc.) from Alchemy's Price API
-   
-   **Note:** 
-   - Make sure `.env` is in `.gitignore` to avoid committing sensitive credentials.
-   - `ALCHEMY_API_KEY` is required for the bot to fetch real market prices
-   - Alchemy's non-enterprise API supports one symbol per call, so the bot makes individual requests for each token
+   **Note:** Make sure `.env` is in `.gitignore` to avoid committing sensitive credentials.
+
+   The bot reads all market prices from the BlockApps on-chain `PriceOracle` contract
+   (configured via `oracle.blockapps_price_oracle` in `config.yaml`). No external
+   pricing API key is required — every non-USDST token used by a configured pool
+   must have a corresponding price entry in that contract. USDST is hardcoded to $1.
 
 4. Edit `config.yaml`:
    ```yaml
-   # Configure multiple pools
    pools:
-     - address: "0000000000000000000000000000000000001017"
-       external_token_name: "ETH"  # Token name for Alchemy price lookup
-     - address: "0000000000000000000000000000000000001019"
-       external_token_name: "BTC"
-   
-   # Trading Parameters  
+     - address: "0000000000000000000000000000000000001017"  # ETH-USDST pool
+     - address: "000000000000000000000000000000000000101b"  # GOLDST-USDST pool
+
+   # Trading Parameters
    trading:
-     fee_bps: 30  # Pool fee in basis points (0.3%)
-     min_profit: 0.01  # $0.01 minimum profit (in USDST, wei-scaled)
-   
-   # Oracle Configuration  
+     fee_bps: 30        # Pool fee in basis points (0.3%)
+     min_profit: 0.01   # $0.01 minimum profit (in USDST, wei-scaled)
+
+   # Oracle Configuration
    oracle:
-     timeout: 10  # API request timeout in seconds
-   
+     timeout: 10
+     blockapps_price_oracle: "0000000000000000000000000000000000001002"
+
    # CDP Liquidation Settings
    liquidation:
-     enabled: true  # Enable CDP liquidation scanning
+     enabled: true
 
    # Execution Settings
    execution:
@@ -124,8 +115,11 @@ python main.py --config custom_config.yaml
 
 2. **Price Discovery**: For each pool, the bot:
    - Fetches the current pool price (from on-chain reserves)
-   - Fetches the oracle price (from Alchemy's Price API using the pool's `external_token_name`)
+   - Fetches the oracle price for every coin from the BlockApps on-chain `PriceOracle`
+     contract (USDST is treated as a fixed $1)
    - Compares the two prices to detect arbitrage opportunities
+   - If any required price is missing from the on-chain oracle, the scan is skipped
+     for that pool and a Slack alert is sent (see `core/notifier.py`)
 
 3. **Opportunity Detection**: When a price difference is detected, the bot:
    - Calculates the optimal trade size using a closed-form solution that maximizes profit
@@ -180,7 +174,10 @@ python main.py --config custom_config.yaml
 ### Pool Configuration
 Each pool in the `pools` array requires:
 - `address`: The pool contract address on Strato
-- `external_token_name`: The token symbol for Alchemy price lookup (e.g., "ETH", "BTC")
+
+Token symbols and addresses are discovered automatically from the pool contract.
+Each non-USDST token must already have a price entry in the BlockApps on-chain
+`PriceOracle` (configured via `oracle.blockapps_price_oracle`).
 
 ### Trading Parameters
 - `fee_bps`: Pool fee in basis points (e.g., 30 = 0.3%)
